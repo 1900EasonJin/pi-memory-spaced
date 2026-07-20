@@ -5,10 +5,15 @@
   "keywords": ["pi-package", "pi-extension", "memory", "spaced-repetition"],
   "type": "module",
   "license": "MIT",
+  "author": "1900EasonJin",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1900EasonJin/pi-memory-spaced.git"
+  },
   "pi": {
     "extensions": ["./src/index.ts"]
   },
-  "dependencies": {
-    "typebox": "^1.3.0"
+  "engines": {
+    "node": ">=18"
   }
 }
