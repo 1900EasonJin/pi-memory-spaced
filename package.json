@@ -1,0 +1,14 @@
+{
+  "name": "pi-memory-spaced",
+  "version": "0.1.0",
+  "description": "间隔重复驱动的 Pi Agent 记忆系统 — 自动提取、冲突检测、路径关联、效力衰减",
+  "keywords": ["pi-package", "pi-extension", "memory", "spaced-repetition"],
+  "type": "module",
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "dependencies": {
+    "typebox": "^1.3.0"
+  }
+}

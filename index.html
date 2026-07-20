@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Agent 记忆系统深度探索报告</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-card: #161b22;
+    --bg-hover: #1c2333;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --accent3: #d2a8ff;
+    --accent4: #f0883e;
+    --accent5: #f778ba;
+    --tag-bg: rgba(88, 166, 255, 0.12);
+    --tag-text: #58a6ff;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+  }
+  .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+
+  /* Hero */
+  .hero {
+    padding: 80px 0 60px;
+    text-align: center;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #0d1117 0%, #161b22 100%);
+  }
+  .hero h1 { font-size: 2.4rem; font-weight: 700; margin-bottom: 12px; }
+  .hero h1 span { background: linear-gradient(135deg, var(--accent), var(--accent3)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .hero p { color: var(--text-dim); font-size: 1.05rem; max-width: 700px; margin: 0 auto; }
+  .hero .meta { margin-top: 24px; font-size: 0.85rem; color: var(--text-dim); }
+  .hero .meta span { display: inline-block; margin: 0 8px; }
+
+  /* TOC */
+  .toc {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 32px 36px;
+    margin: 40px 0;
+  }
+  .toc h2 { font-size: 1.1rem; margin-bottom: 16px; color: var(--accent); }
+  .toc ol { columns: 2; column-gap: 40px; list-style: none; counter-reset: toc; }
+  .toc li { counter-increment: toc; margin-bottom: 6px; }
+  .toc li::before { content: counter(toc) ". "; color: var(--accent); font-weight: 600; }
+  .toc a { color: var(--text-dim); text-decoration: none; font-size: 0.92rem; }
+  .toc a:hover { color: var(--accent); }
+
+  /* Sections */
+  section { margin: 56px 0; }
+  section h2 {
+    font-size: 1.6rem;
+    font-weight: 700;
+    margin-bottom: 24px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  section h2 .icon { font-size: 1.4rem; }
+  section h3 {
+    font-size: 1.15rem;
+    font-weight: 600;
+    margin: 28px 0 12px;
+    color: var(--accent);
+  }
+  section h4 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin: 20px 0 8px;
+    color: var(--text);
+  }
+  section p, section li { color: var(--text-dim); font-size: 0.95rem; }
+  section p { margin-bottom: 12px; }
+  ul, ol { padding-left: 20px; }
+  li { margin-bottom: 6px; }
+
+  /* Cards */
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 16px;
+    margin: 20px 0;
+  }
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 22px;
+    transition: border-color 0.2s, background 0.2s;
+  }
+  .card:hover { border-color: var(--accent); background: var(--bg-hover); }
+  .card .title { font-weight: 600; font-size: 1rem; margin-bottom: 4px; }
+  .card .title a { color: var(--text); text-decoration: none; }
+  .card .title a:hover { color: var(--accent); }
+  .card .sub { font-size: 0.82rem; color: var(--text-dim); margin-bottom: 8px; }
+  .card .desc { font-size: 0.88rem; color: var(--text-dim); line-height: 1.6; }
+  .card .tags { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .tag {
+    display: inline-block;
+    font-size: 0.72rem;
+    padding: 2px 10px;
+    border-radius: 20px;
+    background: var(--tag-bg);
+    color: var(--tag-text);
+  }
+  .tag.green { background: rgba(63, 185, 80, 0.12); color: var(--accent2); }
+  .tag.purple { background: rgba(210, 168, 255, 0.12); color: var(--accent3); }
+  .tag.orange { background: rgba(240, 136, 62, 0.12); color: var(--accent4); }
+  .tag.pink { background: rgba(247, 120, 186, 0.12); color: var(--accent5); }
+
+  /* Comparison Table */
+  .table-wrap { overflow-x: auto; margin: 20px 0; border-radius: 10px; border: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  th, td { padding: 12px 14px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { background: var(--bg-card); font-weight: 600; color: var(--text); white-space: nowrap; }
+  td { color: var(--text-dim); }
+  tr:hover td { background: var(--bg-hover); }
+  .check { color: var(--accent2); }
+  .partial { color: var(--accent4); }
+
+  /* Architecture Diagram */
+  .arch {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 32px;
+    margin: 24px 0;
+    text-align: center;
+    overflow-x: auto;
+  }
+  .arch pre {
+    font-family: "SF Mono", "Fira Code", monospace;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    color: var(--text-dim);
+    text-align: left;
+    display: inline-block;
+  }
+  .arch .hl { color: var(--accent); }
+  .arch .hl2 { color: var(--accent2); }
+  .arch .hl3 { color: var(--accent3); }
+  .arch .hl4 { color: var(--accent4); }
+
+  /* Divider */
+  .divider { border: none; border-top: 1px solid var(--border); margin: 40px 0; }
+
+  /* Section highlight boxes */
+  .insight {
+    background: rgba(88, 166, 255, 0.06);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 8px 8px 0;
+    padding: 16px 20px;
+    margin: 20px 0;
+  }
+  .insight p { margin: 0; font-size: 0.9rem; }
+
+  /* Footer */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 32px 0;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    margin-top: 60px;
+  }
+
+  @media (max-width: 640px) {
+    .hero h1 { font-size: 1.6rem; }
+    .toc ol { columns: 1; }
+    .card-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <div class="container">
+    <h1>🧠 <span>AI Agent 记忆系统</span> 深度探索报告</h1>
+    <p>Pi Agent 记忆扩展生态全景 · Claude Code / Codex CLI / Cursor / Windsurf 记忆架构 · 46 个已知记忆方案对比</p>
+    <div class="meta">
+      <span>📅 2026-07</span>
+      <span>📊 收录 20+ 记忆方案</span>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+  <div class="toc">
+    <h2>📋 目录</h2>
+    <ol>
+      <li><a href="#pi">Pi Agent 记忆扩展生态</a></li>
+      <li><a href="#claude">Claude Code 记忆系统</a></li>
+      <li><a href="#codex">Codex CLI 记忆管线</a></li>
+      <li><a href="#cursor">Cursor 记忆方案</a></li>
+      <li><a href="#windsurf">Windsurf Cascade 记忆</a></li>
+      <li><a href="#cline">Cline Memory Bank</a></li>
+      <li><a href="#aider">Aider 记忆方案</a></li>
+      <li><a href="#mem0">Mem0 / Zep / Letta / Cognee</a></li>
+      <li><a href="#compare">全维度对比表</a></li>
+      <li><a href="#arch">架构模式总结</a></li>
+      <li><a href="#trend">趋势与建议</a></li>
+    </ol>
+  </div>
+
+  <!-- Pi Agent 生态 -->
+  <section id="pi">
+    <h2><span class="icon">🔷</span> Pi Agent 记忆扩展生态</h2>
+    <p>Pi Coding Agent 的设计哲学是"内核最小，一切皆扩展"。记忆也不例外——官方不内置记忆模块，但社区提供了 <strong>至少 13 个</strong> 记忆相关扩展，覆盖从纯文件到向量搜索的各个层次。</p>
+
+    <h3>📦 Pi Memory (jayzeng) <span style="font-size:0.8rem;color:var(--accent2)">★ 最活跃推荐</span></h3>
+    <p>npm 包 <code>pi-memory</code>，基于 qmd（轻量搜索引擎）的语义搜索记忆系统。四个核心工具 + 可选搜索，Markdown 文件存储。</p>
+    <div class="card-grid">
+      <div class="card">
+        <div class="title">📝 核心工具</div>
+        <div class="desc">
+          <code>memory_write</code> — 写入长期记忆或每日日志<br>
+          <code>memory_read</code> — 读取记忆文件<br>
+          <code>scratchpad</code> — 清单管理<br>
+          <code>memory_search</code> — 搜索（需 qmd）<br>
+          <code>memory_status</code> — 健康检查
+        </div>
+      </div>
+      <div class="card">
+        <div class="title">⚡ KV 缓存稳定快照</div>
+        <div class="desc">
+          默认使用缓存稳定模式，在 <code>session_start</code>、<code>session_before_compact</code>、长期写入时刷新快照。避免每轮重建导致 KV 缓存失效。
+        </div>
+      </div>
+      <div class="card">
+        <div class="title">🔍 搜索三模式</div>
+        <div class="desc">
+          <strong>keyword</strong> (~30ms) BM25 精确匹配<br>
+          <strong>semantic</strong> (~2s) 向量语义搜索<br>
+          <strong>deep</strong> (~10s) 混合搜索+重排序
+        </div>
+      </div>
+    </div>
+
+    <h3>📦 @pukljak/pi-memory</h3>
+    <p>持续学习的记忆系统。四个能力闭环：<strong>学习</strong>→<strong>存储</strong>→<strong>调整质量</strong>→<strong>注入上下文</strong>。</p>
+    <ul>
+      <li>命令体系：<code>/memory.status</code> / <code>/memory.search</code> / <code>/memory.timeline</code> / <code>/memory.ui</code>（本地 Web UI）</li>
+      <li>高级模式：Playbook（规则/偏好管理）+ Superpowers 工作流支持</li>
+      <li>质量门控：冲突检测、低质量自动抑制、结果反馈学习（接受/拒绝）</li>
+      <li>私密标记：private-tagged 内容在持久化前脱敏</li>
+    </ul>
+
+    <h3>📦 tickernelz/pi-memory</h3>
+    <p>三角色文件注入系统：<code>MEMORY.md</code>（长期记忆）+ <code>IDENTITY.md</code>（AI 人格）+ <code>USER.md</code>（用户画像）+ <code>daily/</code>（每日日志）。</p>
+    <ul>
+      <li>首次运行交互式引导（Bootstrap 流程）</li>
+      <li>自动将 MEMORY.md / IDENTITY.md / USER.md 注入系统提示</li>
+      <li>Dashboard 部件可选启用</li>
+    </ul>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="title">🔗 claude-mem 系（3 个变体）</div>
+        <div class="tags">
+          <span class="tag purple">claude-mem 桥接</span>
+          <span class="tag purple">FTS5+Chroma</span>
+        </div>
+        <div class="desc">
+          HaqimIskandar/pi-agent-memory、ArtemisAI/pi-mem、husniadil/pi-mem — 将 claude-mem（55k+ stars）移植到 Pi Agent。<br>
+          FTS5 全文搜索 + Chroma 向量嵌入混合检索，跨引擎共享记忆。
+        </div>
+      </div>
+      <div class="card">
+        <div class="title">🧠 三层架构系（2 个）</div>
+        <div class="tags">
+          <span class="tag orange">分层记忆</span>
+          <span class="tag orange">图谱增强</span>
+        </div>
+        <div class="desc">
+          Hdaisen/pi-memory-system：Core Prompt → Session Notebook → Turn Summary<br>
+          becksclair/pi-memory：Session 层 → Durable 层 → Graph 层（实体-声明图）
+        </div>
+      </div>
+      <div class="card">
+        <div class="title">🌲 层次树系</div>
+        <div class="tags">
+          <span class="tag pink">无限容量</span>
+          <span class="tag pink">零依赖</span>
+        </div>
+        <div class="desc">
+          ArtiNexus/pi-memory-tree：WATCH.md（焦点板）→ MEMORY.md（关键词索引）→ Level 1+N（详细分支）。文件系统原生层次树，自动级联召回。
+        </div>
+      </div>
+      <div class="card">
+        <div class="title">🗄️ 持久智能 + 治理</div>
+        <div class="tags">
+          <span class="tag green">Obsidian 集成</span>
+          <span class="tag green">审查回溯</span>
+        </div>
+        <div class="desc">
+          Mont3ll/pi-persistent-intelligence：可治理持久记忆，会话搜索、审查式策展、可选的 Obsidian Vault 集成。
+        </div>
+      </div>
+      <div class="card">
+        <div class="title">⚡ Pi Agent Memory (chendpoc)</div>
+        <div class="tags">
+          <span class="tag orange">秘密脱敏</span>
+          <span class="tag orange">本地优先</span>
+        </div>
+        <div class="desc">
+          本地 Markdown 记忆，自动脱敏常见密钥，跨会话偏好/约定/决策记忆。
+        </div>
+      </div>
+      <div class="card">
+        <div class="title">🔄 自动学习系</div>
+        <div class="tags">
+          <span class="tag green">LLM 提取</span>
+          <span class="tag green">会话末尾整理</span>
+        </div>
+        <div class="desc">
+          davehardy20/pi-memory、bscott/pi-memory、samfoy/pi-memory：会话结束时通过 LLM 自动提取偏好、模式、纠正，注入下个会话。
+        </div>
+      </div>
+    </div>
+
+    <div class="insight">
+      <p><strong>💡 Pi Agent 记忆生态特点：</strong> 完全去中心化、社区驱动。大多数方案基于纯 Markdown 文件存储（可读、可编辑、可 Git 管理），部分可选接入向量搜索。没有"标准"方案，适合按需选用。</p>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- Claude Code -->
+  <section id="claude">
+    <h2><span class="icon">🟣</span> Claude Code 记忆系统</h2>
+    <p>Claude Code 拥有目前 AI 编码 Agent 中最完善的记忆体系之一。两个互补的记忆系统协同工作。</p>
+
+    <h3>系统一：CLAUDE.md 文件（手动编写）</h3>
+    <div class="card-grid">
+      <div class="card">
+        <div class="title">📄 四级作用域</div>
+        <div class="desc">
+          <strong>Managed Policy</strong> — 团队统一管理策略<br>
+          <strong>User</strong> — <code>~/.claude/CLAUDE.md</code> 用户全局指令<br>
+          <strong>Project</strong> — <code>./CLAUDE.md</code> 或 <code>./.claude/CLAUDE.md</code><br>
+          <strong>Local</strong> — <code>./CLAUDE.local.md</code> 本地覆盖
+        </div>
+      </div>
+      <div class="card">
+        <div class="title">📦 存储位置</div>
+        <div class="desc">
+          位于 <code>~/.claude/projects/&lt;name&gt;/memory/</code><br>
+          <code>MEMORY.md</code> 作为索引文件，最多 200 行 / 25KB<br>
+          每个记忆是独立的 Markdown 文件，含 YAML frontmatter
+        </div>
+      </div>
+    </div>
+
+    <h3>系统二：自动记忆（Auto Memory）</h3>
+    <p>Claude 在会话中自主判断哪些信息值得记住，自动写入记忆文件。模型自主决定何时写入、写什么。</p>
+    <ul>
+      <li><strong>存储位置：</strong><code>~/.claude/projects/&lt;repo&gt;/memory/</code></li>
+      <li><strong>索引：</strong><code>MEMORY.md</code> 始终加载到上下文（首 200 行 / 25KB）</li>
+      <li><strong>检索：</strong>通过标准文件工具读取，而非向量检索</li>
+      <li><strong>4 个记忆类型：</strong>user_role / feedback / reference / ...</li>
+      <li><strong>作用域：</strong>每个仓库独立</li>
+    </ul>
+
+    <div class="insight">
+      <p><strong>💡 Claude Code 记忆精髓：</strong> 手动编写（CLAUDE.md）+ 自动积累（Auto Memory）双轨并行。索引文件（MEMORY.md）始终加载，详细记忆按需读取。不依赖向量数据库，纯文件系统方案。</p>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- Codex CLI -->
+  <section id="codex">
+    <h2><span class="icon">🟢</span> Codex CLI 记忆管线（OpenAI）</h2>
+    <p>Codex CLI 的记忆系统是目前技术最成熟的方案之一。基于 Rust 实现的多阶段管线，具备差异遗忘等高级特性。</p>
+
+    <div class="arch">
+<pre>
+┌─────────────────────────────────────────────────────┐
+│              Codex CLI 记忆管线                       │
+├─────────────────────────────────────────────────────┤
+│  Phase 1: <span class="hl">Startup Extraction</span>                          │
+│  ┌─────────────────────────────────────┐             │
+│  │ 扫描最近会话记录（Rollouts）          │             │
+│  │ 提取 → 去重 → 秘密脱敏 → 持久化      │             │
+│  └─────────────────────────────────────┘             │
+│           │                                          │
+│           ▼                                          │
+│  Phase 2: <span class="hl2">Global Consolidation</span>                       │
+│  ┌─────────────────────────────────────┐             │
+│  │ 跨会话全局整合 → 冲突解决              │             │
+│  │ → 差异化遗忘（Diff-based Forgetting）  │             │
+│  └─────────────────────────────────────┘             │
+│           │                                          │
+│           ▼                                          │
+│  <span class="hl3">Context Injection</span>                                    │
+│  ┌─────────────────────────────────────┐             │
+│  │ 使用率感知的检索 → 注入当前上下文      │             │
+│  │ 私密信息自动脱敏                      │             │
+│  └─────────────────────────────────────┘             │
+└─────────────────────────────────────────────────────┘</pre>
+    </div>
+
+    <ul>
+      <li><strong>Phase 1：</strong>启动时从近期会话记录（Rollouts）中提取记忆，去重、秘密脱敏后持久化</li>
+      <li><strong>Phase 2：</strong>全局整合与冲突解决，差异遗忘算法自动淘汰过时事实</li>
+      <li><strong>上下文注入：</strong>使用率感知的智能检索，私密信息自动脱敏</li>
+      <li><strong>存储：</strong><code>~/.codex/memories/</code> 全局统一存储（v2 迁移至此）</li>
+      <li><strong>命令：</strong><code>/m_update</code> 手动更新记忆</li>
+    </ul>
+
+    <div class="insight">
+      <p><strong>💡 Codex CLI 记忆特色：</strong> 多阶段管线架构（提取→整合→注入）+ 差异化遗忘算法。秘密脱敏层是唯一在产品级做了敏感信息自动过滤的方案。</p>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- Cursor -->
+  <section id="cursor">
+    <h2><span class="icon">🟤</span> Cursor 记忆方案</h2>
+    <p>Cursor 本身未内置记忆系统，依赖 MCP（Model Context Protocol）生态提供第三方程。主流方案如下：</p>
+    <div class="card-grid">
+      <div class="card">
+        <div class="title">📦 cursor-mem</div>
+        <div class="desc">自动记录编辑、Shell 命令、MCP 调用 → 注入 Cursor Rules。零配置，无需 API Key。</div>
+      </div>
+      <div class="card">
+        <div class="title">📦 0Latency Memory</div>
+        <div class="desc">MCP 服务端，免费 1000 条记忆。通过 <code>remember/recall</code> 工具访问。</div>
+      </div>
+      <div class="card">
+        <div class="title">📦 cursor-mem0</div>
+        <div class="desc">基于 mem0 管线，本地 embedding（fastembed）+ Qdrant 向量存储，可选 MCP 接口。</div>
+      </div>
+      <div class="card">
+        <div class="title">📦 Walrus Memory</div>
+        <div class="desc">通过 MCP 提供 <code>memwal_remember</code> / <code>memwal_recall</code> 等工具，语义搜索 + 生命周期钩子。</div>
+      </div>
+    </div>
+    <p style="margin-top:4px;">此外，Agent-Memo.AI 等跨平台方案也支持 Cursor。</p>
+  </section>
+
+  <hr class="divider">
+
+  <!-- Windsurf -->
+  <section id="windsurf">
+    <h2><span class="icon">🌊</span> Windsurf Cascade 记忆</h2>
+    <p>Windsurf 提供了双机制记忆系统：</p>
+    <div class="card-grid">
+      <div class="card">
+        <div class="title">📝 Cascade Memories</div>
+        <div class="desc">
+          Cascade 自动生成的会话记忆。每个对话回合中自动更新，跨会话持久。<br>
+          可通过 <code>@memory</code> 命令访问和管理。
+        </div>
+      </div>
+      <div class="card">
+        <div class="title">📄 Rules（.windsurfrules）</div>
+        <div class="desc">
+          用户手动编写的规则文件，永久有效。类似 <code>.cursorrules</code>，存入仓库。<br>
+          每次会话启动时读取，整个团队共享。
+        </div>
+      </div>
+    </div>
+    <div class="insight">
+      <p><strong>💡 Windsurf 特色：</strong> 自动记忆（Memories）+ 手动规则（Rules）双机制。Memories 是 AI 生成的会话上下文，Rules 是人类编写的持久指令。但记忆局限在编辑器内，不能跨工具共享。</p>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- Cline -->
+  <section id="cline">
+    <h2><span class="icon">🔶</span> Cline — Memory Bank 方法论</h2>
+    <p>Cline 本身没有内置记忆模块，但社区发展出著名的 <strong>Memory Bank</strong> 方法论——通过结构化 Markdown 文件让 Agent "永远不忘"。</p>
+
+    <div class="arch">
+<pre>
+┌──────────────────────────────────────────────────┐
+│              Memory Bank 架构                      │
+├──────────────────────────────────────────────────┤
+│  <span class="hl">projectbrief.md</span>  — 项目概述与核心目标             │
+│  <span class="hl2">productContext.md</span> — 为什么做、解决什么问题           │
+│  <span class="hl3">systemPatterns.md</span> — 架构模式与技术选型             │
+│  <span class="hl4">activeContext.md</span>  — 当前焦点与最近变更             │
+│  <span class="hl">progress.md</span>      — 进度追踪与待办项               │
+│  <span class="hl2">decisionLog.md</span>   — 关键决策与理由                │
+└──────────────────────────────────────────────────┘</pre>
+    </div>
+
+    <ul>
+      <li><strong>实现方式：</strong>通过自定义指令（Custom Instructions）+ 生命周期钩子</li>
+      <li><strong>触发：</strong>会话启动时自动加载，监视文件变更</li>
+      <li><strong>可选增强：</strong>Hindsight 集成（自动回忆 + 保留）、MCP Memory Bank 服务器</li>
+    </ul>
+    <div class="insight">
+      <p><strong>💡 Cline Memory Bank 价值：</strong> 方法论而非工具。将"记忆"变成一种可复制的文档规范，适合所有文件型 Agent 采纳。</p>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- Aider -->
+  <section id="aider">
+    <h2><span class="icon">🤖</span> Aider 记忆方案</h2>
+    <p>Aider 通过 <strong>Hindsight</strong> 包装器实现跨会话持久记忆：</p>
+    <ul>
+      <li><code>hindsight-aider</code> 是 <code>aider</code> 命令的透明包装</li>
+      <li>会话前：从记忆库召回相关上下文，注入只读文件</li>
+      <li>会话后：保留完整会话记录供下次提取</li>
+      <li>每 Git 仓库独立作用域</li>
+      <li>同样有 Stompy 等替代方案</li>
+    </ul>
+    <div class="insight">
+      <p><strong>💡 Aider 方案特色：</strong> 无侵入包装器模式——不修改 Aider 本身，通过环境变量和文件实现记忆。</p>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- 通用记忆系统 -->
+  <section id="mem0">
+    <h2><span class="icon">🧩</span> 通用 Agent 记忆框架</h2>
+    <p>以下为独立于特定 Agent 的通用记忆系统，可通过 MCP/SDK 集成到各 Agent：</p>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="title">📦 Mem0</div>
+        <div class="tags"><span class="tag">即插即用</span><span class="tag green">5行代码</span></div>
+        <div class="desc">最快的持久记忆方案。自动提取用户偏好，语义搜索 + 遗忘管理。支持 Pi Agent 插件、MCP 接入。</div>
+      </div>
+      <div class="card">
+        <div class="title">📦 Zep</div>
+        <div class="tags"><span class="tag purple">企业级</span><span class="tag purple">图谱记忆</span></div>
+        <div class="desc">实体关系图记忆 + 会话历史 + 用户画像。GraphRAG 增强，企业级部署。</div>
+      </div>
+      <div class="card">
+        <div class="title">📦 Letta（原 MemGPT）</div>
+        <div class="tags"><span class="tag orange">有状态 Agent</span><span class="tag orange">自编辑</span></div>
+        <div class="desc">将 Agent 本身变为有状态服务，记忆可自我编辑和更新。虚拟内存管理，自主运行场景首选。</div>
+      </div>
+      <div class="card">
+        <div class="title">📦 Cognee</div>
+        <div class="tags"><span class="tag">知识图谱</span></div>
+        <div class="desc">基于知识图谱的记忆引擎。适合文档型记忆需求：实体、关系、结构化检索。</div>
+      </div>
+      <div class="card">
+        <div class="title">📦 LangMem (LangChain)</div>
+        <div class="tags"><span class="tag purple">LC 生态</span></div>
+        <div class="desc">LangChain 生态的记忆方案，与 LangGraph/LangSmith 深度集成。</div>
+      </div>
+      <div class="card">
+        <div class="title">📦 Hindsight</div>
+        <div class="tags"><span class="tag orange">会话前后包装</span></div>
+        <div class="desc">会话前召回 + 会话后保留，无侵入包装。支持 Cline、Aider 等，通过生命周期钩子实现。</div>
+      </div>
+    </div>
+
+    <div class="insight">
+      <p><strong>💡 2026 年基准发现：</strong> Zhou 等人的论文 "Are We Ready For An Agent-Native Memory System?" 评估了 12 个记忆系统，发现记忆架构的选择对成本和性能影响巨大。Mem0 在快速集成上领先，Zep/Letta 在复杂场景表现更好。</p>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- 全维度对比表 -->
+  <section id="compare">
+    <h2><span class="icon">📊</span> 全维度对比表</h2>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>方案</th>
+            <th>存储方式</th>
+            <th>检索方式</th>
+            <th>自动学习</th>
+            <th>跨会话</th>
+            <th>遗忘管理</th>
+            <th>向量搜索</th>
+            <th>集成方式</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Pi Memory (jayzeng)</strong></td>
+            <td>Markdown 文件</td>
+            <td>BM25 + 向量</td>
+            <td><span class="partial">△</span></td>
+            <td><span class="check">✓</span></td>
+            <td><span class="partial">—</span></td>
+            <td><span class="check">✓</span></td>
+            <td>Native 扩展</td>
+          </tr>
+          <tr>
+            <td><strong>@pukljak/pi-memory</strong></td>
+            <td>JSON 文件</td>
+            <td>语义搜索</td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td>Native 扩展</td>
+          </tr>
+          <tr>
+            <td><strong>pi-agent-memory (claude-mem)</strong></td>
+            <td>claude-mem 服务</td>
+            <td>FTS5 + Chroma</td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td>Native 扩展</td>
+          </tr>
+          <tr>
+            <td><strong>Claude Code Auto Memory</strong></td>
+            <td>Markdown 文件</td>
+            <td>文件读取</td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td><span class="partial">△</span></td>
+            <td><span class="partial">—</span></td>
+            <td>内置</td>
+          </tr>
+          <tr>
+            <td><strong>Codex CLI Memories</strong></td>
+            <td>结构化存储</td>
+            <td>管线检索</td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td><span class="partial">—</span></td>
+            <td>内置</td>
+          </tr>
+          <tr>
+            <td><strong>Windsurf Cascade</strong></td>
+            <td>编辑器存储</td>
+            <td>自动注入</td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td><span class="partial">—</span></td>
+            <td><span class="partial">—</span></td>
+            <td>内置</td>
+          </tr>
+          <tr>
+            <td><strong>Cursor (MCP 生态)</strong></td>
+            <td>多种</td>
+            <td>MCP 工具</td>
+            <td><span class="partial">△</span></td>
+            <td><span class="check">✓</span></td>
+            <td><span class="partial">△</span></td>
+            <td><span class="partial">△</span></td>
+            <td>MCP</td>
+          </tr>
+          <tr>
+            <td><strong>Cline Memory Bank</strong></td>
+            <td>Markdown 文件</td>
+            <td>文件读取</td>
+            <td><span class="partial">△</span></td>
+            <td><span class="check">✓</span></td>
+            <td><span class="partial">—</span></td>
+            <td><span class="partial">—</span></td>
+            <td>Custom Instructions</td>
+          </tr>
+          <tr>
+            <td><strong>Aider + Hindsight</strong></td>
+            <td>记忆库</td>
+            <td>语义检索</td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td>包装器</td>
+          </tr>
+          <tr>
+            <td><strong>Mem0</strong></td>
+            <td>云/本地</td>
+            <td>混合搜索</td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td>MCP / SDK</td>
+          </tr>
+          <tr>
+            <td><strong>Zep</strong></td>
+            <td>云/自托管</td>
+            <td>图谱 + 向量</td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td>MCP / SDK</td>
+          </tr>
+          <tr>
+            <td><strong>Letta (MemGPT)</strong></td>
+            <td>有状态服务</td>
+            <td>虚拟内存</td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td><span class="check">✓</span></td>
+            <td>SDK / MCP</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- 架构模式总结 -->
+  <section id="arch">
+    <h2><span class="icon">🏗️</span> 记忆架构模式总结</h2>
+    <p>纵观所有方案，AI Agent 记忆系统可归纳为 <strong>4 种架构模式</strong>：</p>
+
+    <div class="card-grid">
+      <div class="card">
+        <div class="title">📁 文件系统模式</div>
+        <div class="tags"><span class="tag green">最简单</span></div>
+        <div class="desc">
+          代表：Claude Code MEMORY.md、Pi Memory、Cline Memory Bank<br>
+          纯 Markdown/文本文件，Agent 通过标准文件工具读写。<br>
+          ✅ 透明可审计、Git 友好、零依赖<br>
+          ❌ 检索能力有限、无语义理解
+        </div>
+      </div>
+      <div class="card">
+        <div class="title">🔍 混合检索模式</div>
+        <div class="tags"><span class="tag purple">最流行</span></div>
+        <div class="desc">
+          代表：pi-memory+qmd、claude-mem、Hindsight<br>
+          文件存储 + BM25/向量混合检索。<br>
+          ✅ 兼顾透明度和检索能力<br>
+          ❌ 需要额外服务/依赖
+        </div>
+      </div>
+      <div class="card">
+        <div class="title">🏭 管线处理模式</div>
+        <div class="tags"><span class="tag orange">最复杂</span></div>
+        <div class="desc">
+          代表：Codex CLI Memories、Mem0<br>
+          多阶段管线：提取→清洗→整合→注入→遗忘。<br>
+          ✅ 自动化程度最高、质量门控完善<br>
+          ❌ 实现复杂、运维成本高
+        </div>
+      </div>
+      <div class="card">
+        <div class="title">🏛️ 有状态服务模式</div>
+        <div class="tags"><span class="tag pink">最先进</span></div>
+        <div class="desc">
+          代表：Letta、Zep<br>
+          Agent 本身是有状态服务，记忆是第一公民。<br>
+          ✅ 记忆一致性最好、可扩展性强<br>
+          ❌ 架构开销大、不适合轻量场景
+        </div>
+      </div>
+    </div>
+
+    <div class="arch" style="margin-top:28px;">
+<pre>
+<span class="hl">📁 文件系统</span>           <span class="hl2">🔍 混合检索</span>          <span class="hl3">🏭 管线处理</span>         <span class="hl4">🏛️ 有状态服务</span>
+                      简单的               中等                复杂               极高
+
+Agent─────►File        Agent─────►File      Agent─────►Phase1   Agent◄────►Memory
+    │                      │          │           │          │         │  Service
+    └─►read/write          │          ▼           ▼          │         │
+                           │      qmd/BM25   提取+脱敏         │         └─►Stateful
+                           │      Chroma     Phase2           │            Agent
+                           └─►Search        整合+遗忘         │
+                                              └─►Inject  ◄────┘</pre>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- 趋势与建议 -->
+  <section id="trend">
+    <h2><span class="icon">🔮</span> 趋势与建议</h2>
+
+    <h3>2026 年记忆系统趋势</h3>
+    <ul>
+      <li><strong>从附属到第一公民：</strong>记忆不再是"附加功能"，而是 Agent 架构的核心组件。Letta 的有状态 Agent 理念正在被广泛采纳。</li>
+      <li><strong>遗忘与遗忘同等重要：</strong>Codex CLI 的差异遗忘、Mem0 的自动淘汰——好的记忆系统必须知道该忘记什么。</li>
+      <li><strong>MCP 成为标准接口：</strong>Cursor、Windsurf、Cline 等通过 MCP 接入通用记忆服务，跨平台复用。</li>
+      <li><strong>混合搜索是标配：</strong>纯文件检索正在被 BM25+向量混合搜索取代。</li>
+      <li><strong>秘密脱敏不可忽视：</strong>Codex CLI 的秘密脱敏层是一个被低估但至关重要的设计。</li>
+    </ul>
+
+    <h3>如果你要为 Pi Agent 开发记忆扩展……</h3>
+    <div class="insight">
+      <p><strong>建议参考的架构：</strong></p>
+      <p>1️⃣ 底层用 <strong>Markdown 文件</strong>存储（透明可审计）<br>
+      2️⃣ 检索层用 <strong>qmd/qdrant</strong> 实现 BM25+向量混合搜索<br>
+      3️⃣ 参考 <strong>@pukljak/pi-memory</strong> 的质量门控机制（冲突检测、反馈学习）<br>
+      4️⃣ 学习 <strong>Codex CLI</strong> 的管线思路（提取→整合→注入→遗忘）<br>
+      5️⃣ 提供 <strong>Web UI</strong> 方便用户审查和编辑（参考 @pukljak 的 /memory.ui）<br>
+      6️⃣ 通过 <strong>Pi Extension 的事件系统</strong>（session_start / session_before_compact / tool_call hooks）实现非侵入集成</p>
+    </div>
+
+    <h3>快速推荐</h3>
+    <div class="card-grid">
+      <div class="card">
+        <div class="title">🎯 即装即用 → <code>pi-memory</code> (jayzeng)</div>
+        <div class="desc">npm install pi-memory，纯 Markdown + 可选 qmd 搜索。最活跃的 Pi 记忆扩展。</div>
+      </div>
+      <div class="card">
+        <div class="title">🎯 自动学习 → <code>@pukljak/pi-memory</code></div>
+        <div class="desc">持续学习+质量调整+Web UI。适合需要自动化程度较高的用户。</div>
+      </div>
+      <div class="card">
+        <div class="title">🎯 最大兼容 → <code>claude-mem 系</code></div>
+        <div class="desc">与 Claude Code 共享记忆库。适合多 Agent 混用场景。</div>
+      </div>
+      <div class="card">
+        <div class="title">🎯 轻量文件 → <code>tickernelz/pi-memory</code></div>
+        <div class="desc">身份+用户画像+每日日志。最轻量的三文件注入方案。</div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<footer>
+  <div class="container">
+    <p>基于公开文档和源代码分析 · 数据截至 2026 年 7 月</p>
+    <p>研究来源：npm、GitHub、产品官方文档、社区博客</p>
+    <p style="margin-top:8px;font-size:0.78rem;">参考来源：pi-memory(npm) · @pukljak/pi-memory · claude-mem · Codex CLI · Windsurf Docs · Cline Docs · Hindsight · Mem0 · Zep · Letta · Cognee · LangMem · Agent Memory Systems Benchmark (Zhou et al. 2026)</p>
+  </div>
+</footer>
+
+</body>
+</html>
