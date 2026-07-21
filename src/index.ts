@@ -17,7 +17,7 @@ import { MemoryStore } from "./store.ts";
 import { MemoryInjector } from "./injector.ts";
 import { MemoryExtractor } from "./extractor.ts";
 import { writeIndexMd } from "./index-md.ts";
-import { extractPathsFromToolCalls } from "./path-assoc.ts";
+import { accumulateToolCallPath, drainAccumulatedPaths } from "./path-assoc.ts";
 import { registerCommands, updateMemoryWidget } from "./commands.ts";
 import { registerTools } from "./tools.ts";
 import { join } from "node:path";
@@ -105,6 +105,8 @@ export default function (pi: ExtensionAPI) {
       const pathMatches = event.prompt.match(/(?:\/[\w.-]+)+/g);
       if (pathMatches) targetPaths.push(...pathMatches);
     }
+    // 上一轮工具调用涉及的路径
+    targetPaths.push(...drainAccumulatedPaths());
 
     const snapshot = injector.build(targetPaths, turnCounter);
     if (snapshot.text) {
@@ -115,9 +117,9 @@ export default function (pi: ExtensionAPI) {
   // ─── turn_end: 轮次计数 ───
   pi.on("turn_end", async () => { turnCounter++; });
 
-  // ─── tool_call: 收集路径 ───
+  // ─── tool_call: 累积路径供下一轮注入 ───
   pi.on("tool_call", async (event: any, _ctx: any) => {
-    extractPathsFromToolCalls([{ name: event.toolName, args: event.input }]);
+    accumulateToolCallPath(event.toolName, event.input);
   });
 
   // ─── session_before_compact: 刷新快照 ───

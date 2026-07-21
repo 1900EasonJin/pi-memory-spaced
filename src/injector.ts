@@ -62,26 +62,42 @@ export class MemoryInjector {
     const tokenBudget = budget ?? cfg.tokenBudget;
     const injected: MemoryEntry[] = [];
     const injectedIds: string[] = [];
+    let tokensUsed = 0;
+
+    // Phase 0: 固化记忆（固定预算，不参与排名竞争）
+    const tenured = this.store.getTenured();
+    const tenuredBudget = Math.min(300, Math.floor(tokenBudget * 0.15));
+    for (const m of tenured) {
+      const cost = estimateTokens(m.content) + 10;
+      if (tokensUsed + cost <= tenuredBudget) {
+        injected.push(m);
+        injectedIds.push(m.id);
+        tokensUsed += cost;
+      }
+    }
 
     // Phase 1: 路径关联记忆（记忆宫殿）
     if (targetPaths.length > 0) {
-      const pathRelevant = this.store.getRelevantToPaths(targetPaths, 10);
+      const pathRelevant = this.store.getRelevantToPaths(targetPaths, 10)
+        .filter((m) => !injectedIds.includes(m.id));
       for (const m of pathRelevant) {
-        const cost = estimateTokens(m.content) + 10; // + 格式开销
-        if (injected.reduce((s, i) => s + estimateTokens(i.content) + 10, 0) + cost <= tokenBudget) {
+        const cost = estimateTokens(m.content) + 10;
+        if (tokensUsed + cost <= tokenBudget) {
           injected.push(m);
           injectedIds.push(m.id);
+          tokensUsed += cost;
         }
       }
     }
 
-    // Phase 2: 按 potency 补充
+    // Phase 2: 按 potency 补充（从竞争池中挑选）
     const remaining = this.store.getTopN(20).filter((m) => !injectedIds.includes(m.id));
     for (const m of remaining) {
       const cost = estimateTokens(m.content) + 10;
-      if (injected.reduce((s, i) => s + estimateTokens(i.content) + 10, 0) + cost <= tokenBudget) {
+      if (tokensUsed + cost <= tokenBudget) {
         injected.push(m);
         injectedIds.push(m.id);
+        tokensUsed += cost;
       }
     }
 
@@ -95,13 +111,13 @@ export class MemoryInjector {
           m.type === "convention" ? "约定" :
           m.type === "pattern" ? "模式" :
           m.type === "preference" ? "偏好" :
-          m.type === "fact" ? "事实" : "经验";
+          m.type === "fact" ? "事实" :
+          m.tenured ? "🔒 固化" : "经验";
         lines.push(`- [${tag}] ${m.content}`);
       }
     }
 
     const text = lines.join("\n");
-    const tokensUsed = estimateTokens(text);
 
     // 注册 potency 提升（延迟写入，由 shutdown 统一持久化）
     this.store.registerInjections(injectedIds);

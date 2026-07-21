@@ -94,14 +94,19 @@ export class MemoryStore {
     return this.data.memories.find((m) => m.id === id);
   }
 
-  /** 获取活跃记忆（未归档的） */
+  /** 获取活跃记忆（固化记忆 + 未归档竞争记忆） */
   getActive(): MemoryEntry[] {
-    return this.data.memories.filter((m) => m.potency >= this.config.archiveThreshold);
+    return this.data.memories.filter((m) => m.tenured || m.potency >= this.config.archiveThreshold);
   }
 
   /** 获取已归档记忆 */
   getArchived(): MemoryEntry[] {
-    return this.data.memories.filter((m) => m.potency < this.config.archiveThreshold);
+    return this.data.memories.filter((m) => !m.tenured && m.potency < this.config.archiveThreshold);
+  }
+
+  /** 获取已固化记忆 */
+  getTenured(): MemoryEntry[] {
+    return this.data.memories.filter((m) => m.tenured);
   }
 
   /** 按效力排序取 Top-N */
@@ -141,23 +146,27 @@ export class MemoryStore {
 
   // ─── 间隔重复算法 ───
 
-  /** 对所有记忆执行时间衰减 */
+  /** 对所有记忆执行时间衰减（固化记忆跳过） */
   applyDecay(): void {
     const now = Date.now();
     for (const m of this.data.memories) {
+      if (m.tenured) continue;
       const daysSince = (now - m.lastInjectedAt) / (86_400_000);
       m.potency *= Math.pow(this.config.decayFactor, daysSince);
       m.potency = Math.max(0, Math.min(1.0, m.potency));
     }
   }
 
-  /** 标记一条记忆被注入（提升 potency） */
+  /** 标记一条记忆被注入（提升 potency，达到阈值后自动固化） */
   registerInjection(id: string): void {
     const m = this.getById(id);
     if (!m) return;
     m.potency = Math.min(1.0, m.potency + this.config.potencyBoost);
     m.lastInjectedAt = Date.now();
     m.accessCount++;
+    if (!m.tenured && m.accessCount >= this.config.tenureThreshold) {
+      m.tenured = true;
+    }
   }
 
   /** 批量标记注入 */
@@ -193,20 +202,6 @@ export class MemoryStore {
     if (!m) return false;
     Object.assign(m, patch);
     return true;
-  }
-
-  /** 存档 potency 过低的记忆（实际不移除，只是标记） */
-  archiveLowPotency(): number {
-    let count = 0;
-    for (const m of this.data.memories) {
-      if (m.potency < this.config.archiveThreshold && m.potency >= 0) {
-        // 将 potency 设为负值表示已归档（区别于活跃的低分条目）
-        // 我们用 0 到 threshold 之间表示"低但活跃"
-        // 归档就是不再出现在 getActive() 中
-        count++;
-      }
-    }
-    return count;
   }
 
   // ─── 相似度（字符 2-gram overlap 系数，中英文通吃）───

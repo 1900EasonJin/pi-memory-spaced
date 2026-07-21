@@ -30,29 +30,31 @@ const TYPE_LABEL: Record<string, string> = {
   lesson: "💡 经验",
 };
 
-function potencyBadge(p: number): string {
+function potencyBadge(p: number, tenured?: boolean): string {
+  if (tenured) return "🔒";
   if (p >= 0.8) return "🔥";
   if (p >= 0.5) return "⭐";
   return "·";
 }
 
-/** 记忆 → SelectItem（label 用 content 前 N 字，description 用 类型 + potency + 访问） */
+/** 记忆 → SelectItem */
 function toSelectItem(m: MemoryEntry): SelectItem {
+  const prefix = m.tenured ? "🔒 " : "";
   return {
     value: m.id,
-    label: m.content.slice(0, 60) + (m.content.length > 60 ? "…" : ""),
-    description: `${TYPE_ICON[m.type] ?? "📝"} · p:${m.potency.toFixed(2)} · 注入${m.accessCount}次`,
+    label: prefix + m.content.slice(0, 60) + (m.content.length > 60 ? "…" : ""),
+    description: `${TYPE_ICON[m.type] ?? "📝"} · p:${m.potency.toFixed(2)} · 注入${m.accessCount}次${m.tenured ? " 🔒" : ""}`,
   };
 }
 
 /** 记忆详情 → 多行文本，用于 notify 展示 */
 function formatMemoryDetail(m: MemoryEntry): string[] {
   return [
-    `${TYPE_LABEL[m.type] ?? m.type} (${potencyBadge(m.potency)} p:${m.potency.toFixed(2)})`,
+    `${m.tenured ? "🔒 " : ""}${TYPE_LABEL[m.type] ?? m.type} (${potencyBadge(m.potency, m.tenured)} p:${m.potency.toFixed(2)})`,
     `内容: ${m.content}`,
     m.paths.length > 0 ? `关联路径: ${m.paths.join(", ")}` : "",
     m.tags.length > 0 ? `标签: ${m.tags.join(", ")}` : "",
-    `注入 ${m.accessCount} 次 | 创建: ${new Date(m.createdAt).toLocaleDateString()}`,
+    `注入 ${m.accessCount} 次 | 创建: ${new Date(m.createdAt).toLocaleDateString()}${m.tenured ? " | 🔒 已固化" : ""}`,
     `ID: ${m.id}`,
   ].filter(Boolean);
 }
@@ -161,13 +163,18 @@ async function showMemoryDetail(
 /** 更新 PiDeck 底部 Widget（始终可见的记忆统计） */
 export function updateMemoryWidget(ctx: { ui: { setWidget: (id: string, content: string[] | undefined) => void; theme?: { fg: (color: string, text: string) => string } } }, store: MemoryStore): void {
   const active = store.getActive();
+  const tenured = store.getTenured();
 
-  if (active.length === 0) {
+  if (active.length === 0 && tenured.length === 0) {
     ctx.ui.setWidget("mem-spaced", undefined);
     return;
   }
 
-  ctx.ui.setWidget("mem-spaced", [`🧠 ${active.length} 活跃`]);
+  if (tenured.length > 0) {
+    ctx.ui.setWidget("mem-spaced", [`🧠 ${active.length} 活跃 · 🔒 ${tenured.length} 固化`]);
+  } else {
+    ctx.ui.setWidget("mem-spaced", [`🧠 ${active.length} 活跃`]);
+  }
 }
 
 export function registerCommands(pi: any, store: MemoryStore, injector: MemoryInjector): void {
@@ -184,15 +191,16 @@ export function registerCommands(pi: any, store: MemoryStore, injector: MemoryIn
 
       if (!ctx.hasUI) {
         // ── 非 TUI fallback ──
+        const tenured = store.getTenured();
         const lines: string[] = [];
         lines.push("🧠 记忆系统状态");
-        lines.push(`总条目: ${all.length} | 活跃: ${active.length} | 已归档: ${archived.length}`);
+        lines.push(`总条目: ${all.length} | 活跃: ${active.length} | 🔒 固化: ${tenured.length} | 已归档: ${archived.length}`);
         lines.push(`当前注入快照: ${snapshot ? `${snapshot.injectedIds.length} 条, ${snapshot.tokensUsed} tokens` : "无"}`);
         lines.push("");
         lines.push("Top-5 高优先级:");
         for (const m of top5) {
           const label = TYPE_LABEL[m.type] ?? m.type;
-          lines.push(`  ${label}: ${m.content.slice(0, 60)} (p:${m.potency.toFixed(2)})`);
+          lines.push(`  ${potencyBadge(m.potency, m.tenured)} ${label}: ${m.content.slice(0, 60)} (p:${m.potency.toFixed(2)})`);
         }
         ctx.ui.notify(lines.join("\n"), "info");
         return;
@@ -207,8 +215,9 @@ export function registerCommands(pi: any, store: MemoryStore, injector: MemoryIn
         container.addChild(new Spacer(1));
 
         // 统计行
+        const tenured = store.getTenured();
         container.addChild(new Text(`总条目: ${theme.fg("accent", String(all.length))}`, 1, 0));
-        container.addChild(new Text(`活跃: ${theme.fg("success", String(active.length))} · 已归档: ${theme.fg("dim", String(archived.length))}`, 1, 0));
+        container.addChild(new Text(`活跃: ${theme.fg("success", String(active.length))} · 🔒 固化: ${theme.fg("accent", String(tenured.length))} · 已归档: ${theme.fg("dim", String(archived.length))}`, 1, 0));
         container.addChild(new Text(
           `注入快照: ${snapshot ? `${snapshot.injectedIds.length} 条, ${snapshot.tokensUsed} tokens` : "无"}`,
           1, 0,
@@ -219,7 +228,7 @@ export function registerCommands(pi: any, store: MemoryStore, injector: MemoryIn
         container.addChild(new Text(theme.fg("accent", "Top-5 高优先级:")), 1, 0);
         for (const m of top5) {
           const icon = TYPE_ICON[m.type] ?? "📝";
-          const badge = potencyBadge(m.potency);
+          const badge = potencyBadge(m.potency, m.tenured);
           container.addChild(new Text(
             `  ${badge} ${icon} ${m.content.slice(0, 50)}${m.content.length > 50 ? "…" : ""}  ${theme.fg("dim", `p:${m.potency.toFixed(2)}`)}`,
             1, 0,

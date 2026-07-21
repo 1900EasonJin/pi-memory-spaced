@@ -11,7 +11,8 @@ const TYPE_ICON: Record<string, string> = {
   lesson: "💡",
 };
 
-function formatPotency(p: number): string {
+function formatPotency(p: number, tenured?: boolean): string {
+  if (tenured) return "🔒";
   if (p >= 0.8) return "🔥";
   if (p >= 0.5) return "⭐";
   if (p >= 0.3) return "·";
@@ -20,12 +21,12 @@ function formatPotency(p: number): string {
 
 function memoryLine(m: MemoryEntry): string {
   const icon = TYPE_ICON[m.type] ?? "📝";
-  const potencyBadge = formatPotency(m.potency);
-  return `- [${m.type}] ${potencyBadge} ${m.content} (p:${m.potency.toFixed(2)})`;
+  const badge = formatPotency(m.potency, m.tenured);
+  return `- [${m.type}] ${badge} ${m.content} (p:${m.potency.toFixed(2)})${m.tenured ? " 🔒" : ""}`;
 }
 
 /** 生成 MEMORY.md 内容 */
-export function generateIndexMd(data: MemoryStoreData, maxLines = 50): string {
+export function generateIndexMd(data: MemoryStoreData, maxLines = 50, archiveThreshold = 0.1): string {
   const lines: string[] = [];
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
 
@@ -34,8 +35,8 @@ export function generateIndexMd(data: MemoryStoreData, maxLines = 50): string {
   lines.push(`> 最后更新: ${now}`);
   lines.push("");
 
-  // 活跃记忆按 potency 排序
-  const active = data.memories.filter((m) => m.potency >= 0.1).sort((a, b) => b.potency - a.potency);
+  // 活跃记忆（固化记忆+未归档的竞争记忆）按 potency 排序
+  const active = data.memories.filter((m) => m.tenured || m.potency >= archiveThreshold).sort((a, b) => b.potency - a.potency);
   const topN = active.slice(0, maxLines - 10);
 
   if (topN.length > 0) {
@@ -62,15 +63,16 @@ export function generateIndexMd(data: MemoryStoreData, maxLines = 50): string {
   }
 
   // 统计
+  const tenured = data.memories.filter((m) => m.tenured);
   lines.push("---");
-  lines.push(`共 ${data.memories.length} 条记忆，活跃 ${active.length} 条`);
+  lines.push(`共 ${data.memories.length} 条记忆，活跃 ${active.length} 条${tenured.length > 0 ? `，🔒 固化 ${tenured.length} 条` : ""}`);
 
   return lines.join("\n");
 }
 
 /** 写入 MEMORY.md */
-export function writeIndexMd(dirPath: string, data: MemoryStoreData, maxLines?: number): string {
-  const content = generateIndexMd(data, maxLines);
+export function writeIndexMd(dirPath: string, data: MemoryStoreData, maxLines?: number, archiveThreshold?: number): string {
+  const content = generateIndexMd(data, maxLines, archiveThreshold);
   const indexPath = join(dirPath, "MEMORY.md");
   mkdirSync(dirname(indexPath), { recursive: true });
   writeFileSync(indexPath, content, "utf-8");

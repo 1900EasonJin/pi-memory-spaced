@@ -19,6 +19,8 @@ export interface MemoryEntry {
   tags: string[];
   /** 来源会话 id（auto 类型时记录） */
   sourceSession?: string;
+  /** 是否已固化（accessCount ≥ 固化阈值后自动晋升，不再参与衰减和排名竞争） */
+  tenured?: boolean;
 }
 
 /** 持久化存储格式 */
@@ -40,6 +42,8 @@ export interface InjectionConfig {
   decayFactor: number;
   /** 存档阈值 */
   archiveThreshold: number;
+  /** 固化阈值（accessCount ≥ 此值后自动晋升为永久记忆） */
+  tenureThreshold: number;
 }
 
 export const DEFAULT_INJECTION_CONFIG: InjectionConfig = {
@@ -48,6 +52,7 @@ export const DEFAULT_INJECTION_CONFIG: InjectionConfig = {
   potencyBoost: 0.3,
   decayFactor: 0.95,
   archiveThreshold: 0.1,
+  tenureThreshold: 50,
 };
 
 /** 入库闸门判定级别 */

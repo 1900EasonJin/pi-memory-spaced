@@ -32,7 +32,8 @@ export function registerTools(pi: ExtensionAPI, store: MemoryStore): void {
           m.type === "pattern" ? "🔁 模式" :
           m.type === "preference" ? "⭐ 偏好" :
           m.type === "fact" ? "📌 事实" : "💡 经验";
-        return `${i + 1}. ${typeLabel}: ${m.content}` +
+        const tenuredMark = m.tenured ? " 🔒" : "";
+        return `${i + 1}.${tenuredMark} ${typeLabel}: ${m.content}` +
           (m.paths.length > 0 ? `\n   关联路径: ${m.paths.join(", ")}` : "");
       }).join("\n\n");
 
