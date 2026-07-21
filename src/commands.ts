@@ -163,18 +163,20 @@ async function showMemoryDetail(
 /** 更新 PiDeck 底部 Widget（始终可见的记忆统计） */
 export function updateMemoryWidget(ctx: { ui: { setWidget: (id: string, content: string[] | undefined) => void; theme?: { fg: (color: string, text: string) => string } } }, store: MemoryStore): void {
   const active = store.getActive();
+  const lowEff = store.getLowEfficiency();
   const tenured = store.getTenured();
 
-  if (active.length === 0 && tenured.length === 0) {
+  if (active.length === 0 && lowEff.length === 0 && tenured.length === 0) {
     ctx.ui.setWidget("mem-spaced", undefined);
     return;
   }
 
-  if (tenured.length > 0) {
-    ctx.ui.setWidget("mem-spaced", [`🧠 ${active.length} 活跃 · 🔒 ${tenured.length} 固化`]);
-  } else {
-    ctx.ui.setWidget("mem-spaced", [`🧠 ${active.length} 活跃`]);
-  }
+  const parts: string[] = [];
+  if (active.length > 0) parts.push(`${active.length} 活跃`);
+  if (lowEff.length > 0) parts.push(`${lowEff.length} 低效`);
+  if (tenured.length > 0) parts.push(`🔒 ${tenured.length} 固化`);
+
+  ctx.ui.setWidget("mem-spaced", [`🧠 ${parts.join(" · ")}`]);
 }
 
 export function registerCommands(pi: any, store: MemoryStore, injector: MemoryInjector): void {
@@ -185,7 +187,7 @@ export function registerCommands(pi: any, store: MemoryStore, injector: MemoryIn
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
       const all = store.getAll();
       const active = store.getActive();
-      const archived = store.getArchived();
+      const lowEff = store.getLowEfficiency();
       const top5 = store.getTopN(5);
       const snapshot = injector.getCurrentSnapshot();
 
@@ -194,7 +196,7 @@ export function registerCommands(pi: any, store: MemoryStore, injector: MemoryIn
         const tenured = store.getTenured();
         const lines: string[] = [];
         lines.push("🧠 记忆系统状态");
-        lines.push(`总条目: ${all.length} | 活跃: ${active.length} | 🔒 固化: ${tenured.length} | 已归档: ${archived.length}`);
+        lines.push(`总条目: ${all.length} | 活跃: ${active.length} | 低效: ${lowEff.length} | 🔒 固化: ${tenured.length} | 已斩杀: ${store.getPrunedCount()} 条`);
         lines.push(`当前注入快照: ${snapshot ? `${snapshot.injectedIds.length} 条, ${snapshot.tokensUsed} tokens` : "无"}`);
         lines.push("");
         lines.push("Top-5 高优先级:");
@@ -217,7 +219,7 @@ export function registerCommands(pi: any, store: MemoryStore, injector: MemoryIn
         // 统计行
         const tenured = store.getTenured();
         container.addChild(new Text(`总条目: ${theme.fg("accent", String(all.length))}`, 1, 0));
-        container.addChild(new Text(`活跃: ${theme.fg("success", String(active.length))} · 🔒 固化: ${theme.fg("accent", String(tenured.length))} · 已归档: ${theme.fg("dim", String(archived.length))}`, 1, 0));
+        container.addChild(new Text(`活跃: ${theme.fg("success", String(active.length))} · 低效: ${theme.fg("warning", String(store.getLowEfficiency().length))} · 🔒 固化: ${theme.fg("accent", String(tenured.length))} · 已斩杀: ${theme.fg("dim", String(store.getPrunedCount()))} 条`, 1, 0));
         container.addChild(new Text(
           `注入快照: ${snapshot ? `${snapshot.injectedIds.length} 条, ${snapshot.tokensUsed} tokens` : "无"}`,
           1, 0,

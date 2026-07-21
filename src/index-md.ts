@@ -26,7 +26,7 @@ function memoryLine(m: MemoryEntry): string {
 }
 
 /** 生成 MEMORY.md 内容 */
-export function generateIndexMd(data: MemoryStoreData, maxLines = 50, archiveThreshold = 0.1): string {
+export function generateIndexMd(data: MemoryStoreData, maxLines = 50, archiveThreshold = 0.2): string {
   const lines: string[] = [];
   const now = new Date().toISOString().slice(0, 19).replace("T", " ");
 

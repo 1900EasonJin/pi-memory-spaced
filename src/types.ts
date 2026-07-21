@@ -28,6 +28,8 @@ export interface MemoryStoreData {
   version: number;
   updatedAt: number;
   memories: MemoryEntry[];
+  /** 累计斩杀的低效记忆条数 */
+  prunedCount?: number;
 }
 
 /** 注入配置 */
@@ -40,8 +42,10 @@ export interface InjectionConfig {
   potencyBoost: number;
   /** 每日衰减因子 */
   decayFactor: number;
-  /** 存档阈值 */
+  /** 斩杀阈值（potency 低于此值的非固化记忆直接删除） */
   archiveThreshold: number;
+  /** 低效阈值（potency 低于此值但高于斩杀线的记忆标记为低效，仍可注入） */
+  lowEfficiencyThreshold: number;
   /** 固化阈值（accessCount ≥ 此值后自动晋升为永久记忆） */
   tenureThreshold: number;
 }
@@ -51,7 +55,8 @@ export const DEFAULT_INJECTION_CONFIG: InjectionConfig = {
   maxMemoryLength: 500,
   potencyBoost: 0.3,
   decayFactor: 0.95,
-  archiveThreshold: 0.1,
+  archiveThreshold: 0.05,
+  lowEfficiencyThreshold: 0.2,
   tenureThreshold: 50,
 };
 

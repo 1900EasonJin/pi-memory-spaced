@@ -25,7 +25,7 @@ function assert(condition: boolean, msg: string) {
 function createTestStore(): MemoryStore {
   return new MemoryStore({
     storePath: `/tmp/pi-memory-test-${Date.now()}-${Math.random()}.json`,
-    config: { decayFactor: 0.5 }, // 加速衰减，方便测试
+    config: { decayFactor: 0.95 }, // 略高于斩杀线 0.2 即可验证衰减
   });
 }
 
@@ -189,20 +189,26 @@ function testPersistence() {
   assert(store2.getAll()[0].content === "持久化测试", "重新加载后内容正确");
 }
 
-// ─── 10. 归档 ───
+// ─── 10. 斩杀过滤 ───
 function testArchive() {
-  console.log("\n📋 测试: 归档");
+  console.log("\n📋 测试: 三级分类（活跃/低效/斩杀）");
 
   const store = createTestStore();
   store.add({ type: "fact", content: "活跃记忆", paths: [], potency: 0.8, source: "manual", tags: [] });
-  store.add({ type: "fact", content: "低分活跃", paths: [], potency: 0.15, source: "manual", tags: [] });
+  store.add({ type: "fact", content: "低效记忆", paths: [], potency: 0.15, source: "manual", tags: [] });
+  store.add({ type: "fact", content: "斩杀线记忆", paths: [], potency: 0.06, source: "manual", tags: [] });
 
-  const active = store.getActive();
-  assert(active.length === 2, "两条都在活跃列表中（threshold=0.1）");
+  // getActive 只返回 potency >= 0.2 的
+  assert(store.getActive().length === 1, "活跃: 只有 0.8 的");
+  // getLowEfficiency 返回 0.05~0.2 之间的
+  assert(store.getLowEfficiency().length === 2, "低效: 0.15 和 0.06 都算");
+  // getInjectable 返回全部 >= 0.05 的（含低效）
+  assert(store.getInjectable().length === 3, "可注入: 全部 3 条");
 
-  // 增加一条低于 threshold 的
-  store.add({ type: "fact", content: "已归档", paths: [], potency: 0.05, source: "manual", tags: [] });
-  assert(store.getActive().length === 2, "归档条目不在活跃列表中");
+  // 再加一条低于斩杀线的
+  store.add({ type: "fact", content: "被斩杀", paths: [], potency: 0.04, source: "manual", tags: [] });
+  assert(store.getAll().length === 4, "低于斩杀线的仍存在（衰减时才删）");
+  assert(store.getInjectable().length === 3, "但不可注入");
 }
 
 // ─── 11. 中文相似度（2-gram Dice）───
@@ -246,12 +252,12 @@ function testDedupeGate() {
   const none = store.dedupeCheck("燕麦多孔淀粉制备工艺研究");
   assert(none.level === "none", "无关内容 → none");
 
-  // 已归档记忆也参与查重
+  // 低效记忆（potency 低于斩杀线）也参与查重
   const store2 = createTestStore();
   const m = store2.add({ type: "fact", content: "一条快要被遗忘的记忆事实", paths: [], potency: 0.05, source: "auto", tags: [] });
-  assert(store2.getArchived().some((x) => x.id === m.id), "前置条件：该记忆已归档");
-  const archived = store2.dedupeCheck("一条快要被遗忘的记忆事实");
-  assert(archived.level === "exact", "已归档记忆也能被闸门命中");
+  assert(store2.getAll().some((x) => x.id === m.id), "前置条件：该记忆存在");
+  const low = store2.dedupeCheck("一条快要被遗忘的记忆事实");
+  assert(low.level === "exact", "低效记忆也能被闸门命中防重复");
 }
 
 // ─── 13. 存量去重 dedupeAll（自动合并）───
@@ -273,19 +279,13 @@ function testDedupeAll() {
   assert(keeper!.paths.includes("/a.ts") && keeper!.paths.includes("/b.ts"), "paths 取并集");
   assert(keeper!.tags.includes("a") && keeper!.tags.includes("b"), "tags 取并集");
 
-  // 中高相似（≥0.55）→ 自动合并，不再创建冲突
+  // 中相似（0.45~0.8，重复率较小）→ 不合并，允许并存
   const store2 = createTestStore();
-  const m1 = store2.add({ type: "decision", content: "冲突解决按钮统一为三个：合并、另存、不采纳", paths: [], potency: 0.8, source: "auto", tags: [] });
+  store2.add({ type: "decision", content: "冲突解决按钮统一为三个：合并、另存、不采纳", paths: [], potency: 0.8, source: "auto", tags: [] });
   store2.add({ type: "decision", content: "冲突解决操作确定为三个按钮：合并、另存、不采纳", paths: [], potency: 0.6, source: "auto", tags: [] });
   const r2 = store2.dedupeAll();
-  assert(r2.merged === 1, `中高相似（≥0.55）自动合并（实际 merged=${r2.merged}）`);
-  assert(store2.getAll().length === 1, "合并后只剩 1 条");
-  const mergedKeeper = store2.getAll()[0];
-  assert(mergedKeeper.id === m1.id, "保留 potency 高者");
-  assert(mergedKeeper.potency === 0.8, "potency 保留最高值");
-  // 再跑一次无变化
-  const r3 = store2.dedupeAll();
-  assert(r3.merged === 0, "重复运行无变化");
+  assert(r2.merged === 0, `中相似不合并（实际 merged=${r2.merged}）`);
+  assert(store2.getAll().length === 2, "两条均保留");
 
   // 极高相似（≥0.8，措辞变体）→ 自动合并
   const store3 = createTestStore();

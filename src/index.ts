@@ -30,19 +30,21 @@ export default function (pi: ExtensionAPI) {
   const extractor = new MemoryExtractor(store);
   let turnCounter = 0;
   let sessionId = "";
+  /** 已积累未提取的轮数：攒够 EXTRACT_EVERY_N_ROUNDS 轮才触发一次提取，控制写入频率 */
+  let pendingRounds = 0;
+  const EXTRACT_EVERY_N_ROUNDS = 5;
 
   // ─── session_start: 加载状态，执行衰减 ───
   pi.on("session_start", async (_event: any, ctx: any) => {
     sessionId = ctx.sessionManager?.getSessionId() ?? "unknown";
     store.reload(); // 从磁盘重新加载，同步外部修改
 
-    // 存量去重：自动合并精确重复和中高相似记忆（≥0.55），零打扰
-    const dd = store.dedupeAll();
-    if (dd.merged > 0) {
-      ctx.ui.notify(`🧠 已合并 ${dd.merged} 条重复/相似记忆`, "info");
+    const beforePrune = store.getPrunedCount();
+    store.applyDecay();  // 内部执行衰减 + 斩杀
+    const pruned = store.getPrunedCount() - beforePrune;
+    if (pruned > 0) {
+      ctx.ui.notify(`⚔️ 已斩杀 ${pruned} 条低效记忆`, "info");
     }
-
-    store.applyDecay();
     store.save();
 
     const data = { version: 1, updatedAt: Date.now(), memories: store.getAll() };
@@ -50,7 +52,7 @@ export default function (pi: ExtensionAPI) {
 
     injector.invalidateSnapshot();
     updateMemoryWidget(ctx, store);
-    ctx.ui.setStatus("mem-spaced", `${store.getActive().length} 条记忆`);
+    ctx.ui.setStatus("mem-spaced", `${store.getInjectable().length} 条记忆`);
   });
 
   // ─── input: 拦截"记住：xxx"口语指令 ───
@@ -92,7 +94,7 @@ export default function (pi: ExtensionAPI) {
 
     const data = { version: 1, updatedAt: Date.now(), memories: store.getAll() };
     writeIndexMd(storeDir, data);
-    ctx.ui.setStatus("mem-spaced", `${store.getActive().length} 条记忆`);
+    ctx.ui.setStatus("mem-spaced", `${store.getInjectable().length} 条记忆`);
     ctx.ui.notify(`✅ 已记住: ${content.slice(0, 80)}`, "info");
 
     return { action: "handled" as const };
@@ -130,6 +132,10 @@ export default function (pi: ExtensionAPI) {
   // 存量去重自动合并。用户零打扰。
   pi.on("agent_settled", async (_event: any, ctx: any) => {
     try {
+      pendingRounds++;
+      if (pendingRounds < EXTRACT_EVERY_N_ROUNDS) return;
+      pendingRounds = 0;
+
       store.reload(); // 同步卡片/外部对 JSON 的修改
       const entries = ctx.sessionManager?.getBranch?.() ?? [];
       const messages = entries
@@ -142,11 +148,17 @@ export default function (pi: ExtensionAPI) {
       const result = await extractor.extract(messages, ctx.modelRegistry, sessionId);
       if (result.added === 0) return;
 
+      // 写入后立即去重，从源头杜绝重复
+      const dd = store.dedupeAll();
+      if (dd.merged > 0) {
+        ctx.ui.notify(`🧠 已合并 ${dd.merged} 条重复/相似记忆`, "info");
+      }
+
       store.save();
       updateMemoryWidget(ctx, store);
       const data = { version: 1, updatedAt: Date.now(), memories: store.getAll() };
       writeIndexMd(storeDir, data);
-      ctx.ui.setStatus("mem-spaced", `${store.getActive().length} 条记忆`);
+      ctx.ui.setStatus("mem-spaced", `${store.getInjectable().length} 条记忆`);
       ctx.ui.notify(`🧠 自动记忆: 新增 ${result.added} 条`, "info");
     } catch { /* 静默失败 */ }
   });

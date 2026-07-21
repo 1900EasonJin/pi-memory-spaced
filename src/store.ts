@@ -37,8 +37,8 @@ function bigrams(s: string): Set<string> {
 /** 入库闸门阈值（overlap 系数实测：重复对 0.52~0.66，相关但不同 0.35~0.38，无关 <0.1） */
 export const GATE_HIGH_THRESHOLD = 0.8;
 export const GATE_MID_THRESHOLD = 0.45;
-/** 存量自动合并的阈值（≥0.55 的措辞变体自动合并到高 potency 条目） */
-export const DEDUPE_MERGE_THRESHOLD = 0.55;
+/** 存量自动合并的阈值，与入库闸门 high 对齐：≥0.8 十分相似才合并，0.45~0.8 允许并存 */
+export const DEDUPE_MERGE_THRESHOLD = GATE_HIGH_THRESHOLD;
 
 /**
  * Memory Store — 纯文件系统持久化，间隔重复驱动
@@ -63,13 +63,15 @@ export class MemoryStore {
   private load(): MemoryStoreData {
     // ponytail: 旧 JSON 可能残留 conflicts/resolvedSources 字段，运行时忽略即可
     if (!existsSync(this.storePath)) {
-      return { version: 1, updatedAt: Date.now(), memories: [] };
+      return { version: 1, updatedAt: Date.now(), memories: [], prunedCount: 0 };
     }
     try {
       const raw = readFileSync(this.storePath, "utf-8");
-      return JSON.parse(raw) as MemoryStoreData;
+      const data = JSON.parse(raw) as MemoryStoreData;
+      if (data.prunedCount === undefined) data.prunedCount = 0; // 兼容旧数据
+      return data;
     } catch {
-      return { version: 1, updatedAt: Date.now(), memories: [] };
+      return { version: 1, updatedAt: Date.now(), memories: [], prunedCount: 0 };
     }
   }
 
@@ -94,14 +96,19 @@ export class MemoryStore {
     return this.data.memories.find((m) => m.id === id);
   }
 
-  /** 获取活跃记忆（固化记忆 + 未归档竞争记忆） */
-  getActive(): MemoryEntry[] {
+  /** 获取可注入记忆（固化记忆 + 未斩杀竞争记忆，含低效） */
+  getInjectable(): MemoryEntry[] {
     return this.data.memories.filter((m) => m.tenured || m.potency >= this.config.archiveThreshold);
   }
 
-  /** 获取已归档记忆 */
-  getArchived(): MemoryEntry[] {
-    return this.data.memories.filter((m) => !m.tenured && m.potency < this.config.archiveThreshold);
+  /** 获取活跃记忆（potency ≥ 低效线） */
+  getActive(): MemoryEntry[] {
+    return this.data.memories.filter((m) => m.tenured || m.potency >= this.config.lowEfficiencyThreshold);
+  }
+
+  /** 获取低效记忆（斩杀线 ≤ potency < 低效线，仍可注入） */
+  getLowEfficiency(): MemoryEntry[] {
+    return this.data.memories.filter((m) => !m.tenured && m.potency >= this.config.archiveThreshold && m.potency < this.config.lowEfficiencyThreshold);
   }
 
   /** 获取已固化记忆 */
@@ -109,16 +116,21 @@ export class MemoryStore {
     return this.data.memories.filter((m) => m.tenured);
   }
 
-  /** 按效力排序取 Top-N */
+  /** 获取累计斩杀的低效记忆条数 */
+  getPrunedCount(): number {
+    return this.data.prunedCount ?? 0;
+  }
+
+  /** 按效力排序取 Top-N（从全部可注入记忆中选，含低效） */
   getTopN(n: number): MemoryEntry[] {
-    return [...this.getActive()]
+    return [...this.getInjectable()]
       .sort((a, b) => b.potency - a.potency)
       .slice(0, n);
   }
 
-  /** 按路径关联度 + 效力排序 */
+  /** 按路径关联度 + 效力排序（从全部可注入记忆中选，含低效） */
   getRelevantToPaths(targetPaths: string[], limit: number): MemoryEntry[] {
-    const scored = this.getActive().map((m) => {
+    const scored = this.getInjectable().map((m) => {
       let pathScore = 0;
       for (const tp of targetPaths) {
         for (const mp of m.paths) {
@@ -146,7 +158,7 @@ export class MemoryStore {
 
   // ─── 间隔重复算法 ───
 
-  /** 对所有记忆执行时间衰减（固化记忆跳过） */
+  /** 对所有记忆执行时间衰减（固化记忆跳过），衰减后斩杀低效记忆 */
   applyDecay(): void {
     const now = Date.now();
     for (const m of this.data.memories) {
@@ -155,6 +167,16 @@ export class MemoryStore {
       m.potency *= Math.pow(this.config.decayFactor, daysSince);
       m.potency = Math.max(0, Math.min(1.0, m.potency));
     }
+    this.pruneLowPotency();
+  }
+
+  /** 斩杀：删除所有 potency 低于阈值的非固化记忆，返回本次删了多少 */
+  pruneLowPotency(): { deleted: number } {
+    const before = this.data.memories.length;
+    this.data.memories = this.data.memories.filter((m) => m.tenured || m.potency >= this.config.archiveThreshold);
+    const deleted = before - this.data.memories.length;
+    if (deleted > 0) this.data.prunedCount = (this.data.prunedCount ?? 0) + deleted;
+    return { deleted };
   }
 
   /** 标记一条记忆被注入（提升 potency，达到阈值后自动固化） */
@@ -222,7 +244,7 @@ export class MemoryStore {
   }
 
   /**
-   * 统一入库闸门：检查新内容与全部记忆（含已归档）的重复程度。
+   * 统一入库闸门：检查新内容与全部记忆的重复程度。
    * exact — 归一化后完全相同；high — 相似度 ≥0.8；mid — 相似度 ≥0.45；none — 无重复。
    */
   dedupeCheck(content: string): { level: DedupeLevel; matches: Array<{ entry: MemoryEntry; similarity: number }> } {
@@ -269,8 +291,8 @@ export class MemoryStore {
       this.data.memories = this.data.memories.filter((m) => !removeIds.has(m.id));
     }
 
-    // 中高相似（≥0.55，同一事实的措辞变体）→ 自动合并低 potency 到高 potency
-    // ponytail: 阈值覆盖原来的 conflict 区间（0.55~0.8），不再产生手动冲突
+    // 十分相似（≥0.8，同一事实的措辞变体）→ 自动合并低 potency 到高 potency
+    // ponytail: 阈值与入库闸门 high 一致，mid 区间（0.45~0.8）作为独立记忆保留
     const sorted2 = [...this.data.memories].sort((a, b) => b.potency - a.potency);
     const removeIds2 = new Set<string>();
     for (let i = 0; i < sorted2.length; i++) {
