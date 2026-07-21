@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
-import type { MemoryEntry, MemoryStoreData, InjectionConfig, ConflictItem } from "./types.ts";
+import type { MemoryEntry, MemoryStoreData, InjectionConfig, DedupeLevel } from "./types.ts";
 import { DEFAULT_INJECTION_CONFIG } from "./types.ts";
 
 let _idCounter = 0;
@@ -9,10 +9,41 @@ function genId(): string {
   return `mem_${Date.now().toString(36)}_${(++_idCounter).toString(36)}`;
 }
 
+/** 简单 hash：取字符编码和 */
+export function simpleHash(s: string): string {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) - h) + s.charCodeAt(i);
+    h |= 0;
+  }
+  return h.toString(36);
+}
+
+/** 归一化文本：小写、去除空白与标点符号，用于精确匹配与 hash */
+export function normalizeText(s: string): string {
+  return s.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+}
+
+/** 字符 2-gram 集合（基于归一化文本，中文按字切、英文按字符切，无需分词） */
+function bigrams(s: string): Set<string> {
+  const t = normalizeText(s);
+  const set = new Set<string>();
+  if (t.length === 0) return set;
+  if (t.length === 1) { set.add(t); return set; }
+  for (let i = 0; i < t.length - 1; i++) set.add(t.slice(i, i + 2));
+  return set;
+}
+
+/** 入库闸门阈值（overlap 系数实测：重复对 0.52~0.66，相关但不同 0.35~0.38，无关 <0.1） */
+export const GATE_HIGH_THRESHOLD = 0.8;
+export const GATE_MID_THRESHOLD = 0.45;
+/** 存量自动合并的阈值（≥0.55 的措辞变体自动合并到高 potency 条目） */
+export const DEDUPE_MERGE_THRESHOLD = 0.55;
+
 /**
  * Memory Store — 纯文件系统持久化，间隔重复驱动
  *
- * 存储路径：~/.pi/agent/memory-spaced/memory-store.json
+ * 存储路径：~/.pi/agent/memory-store.json
  */
 export class MemoryStore {
   private data: MemoryStoreData;
@@ -22,7 +53,7 @@ export class MemoryStore {
 
   constructor(opts?: { storePath?: string; config?: Partial<InjectionConfig> }) {
     this.config = { ...DEFAULT_INJECTION_CONFIG, ...opts?.config };
-    this.storePath = opts?.storePath ?? join(homedir(), ".pi", "agent", "memory-spaced", "memory-store.json");
+    this.storePath = opts?.storePath ?? join(homedir(), ".pi", "agent", "memory-store.json");
     this.dirPath = dirname(this.storePath);
     this.data = this.load();
   }
@@ -30,14 +61,15 @@ export class MemoryStore {
   // ─── 持久化 ───
 
   private load(): MemoryStoreData {
+    // ponytail: 旧 JSON 可能残留 conflicts/resolvedSources 字段，运行时忽略即可
     if (!existsSync(this.storePath)) {
-      return { version: 1, updatedAt: Date.now(), memories: [], conflicts: [] };
+      return { version: 1, updatedAt: Date.now(), memories: [] };
     }
     try {
       const raw = readFileSync(this.storePath, "utf-8");
       return JSON.parse(raw) as MemoryStoreData;
     } catch {
-      return { version: 1, updatedAt: Date.now(), memories: [], conflicts: [] };
+      return { version: 1, updatedAt: Date.now(), memories: [] };
     }
   }
 
@@ -45,6 +77,11 @@ export class MemoryStore {
     this.data.updatedAt = Date.now();
     mkdirSync(this.dirPath, { recursive: true });
     writeFileSync(this.storePath, JSON.stringify(this.data, null, 2), "utf-8");
+  }
+
+  /** 从磁盘重新加载（外部修改后同步内存状态） */
+  reload(): void {
+    this.data = this.load();
   }
 
   // ─── 查询 ───
@@ -55,10 +92,6 @@ export class MemoryStore {
 
   getById(id: string): MemoryEntry | undefined {
     return this.data.memories.find((m) => m.id === id);
-  }
-
-  getConflicts(): ConflictItem[] {
-    return this.data.conflicts;
   }
 
   /** 获取活跃记忆（未归档的） */
@@ -134,7 +167,7 @@ export class MemoryStore {
 
   // ─── 增删改 ───
 
-  add(entry: Omit<MemoryEntry, "id" | "createdAt" | "lastInjectedAt" | "accessCount" | "conflictsWith">): MemoryEntry {
+  add(entry: Omit<MemoryEntry, "id" | "createdAt" | "lastInjectedAt" | "accessCount">): MemoryEntry {
     const now = Date.now();
     const mem: MemoryEntry = {
       ...entry,
@@ -143,7 +176,6 @@ export class MemoryStore {
       createdAt: now,
       lastInjectedAt: now,  // 初始化为创建时间，避免衰减从 1970 开始
       accessCount: 0,
-      conflictsWith: [],
     };
     this.data.memories.push(mem);
     return mem;
@@ -177,28 +209,93 @@ export class MemoryStore {
     return count;
   }
 
-  // ─── 冲突管理 ───
+  // ─── 相似度（字符 2-gram overlap 系数，中英文通吃）───
 
-  addConflict(item: ConflictItem): void {
-    this.data.conflicts.push(item);
-  }
-
-  resolveConflict(index: number): void {
-    if (index >= 0 && index < this.data.conflicts.length) {
-      this.data.conflicts.splice(index, 1);
-    }
-  }
-
-  // ─── 相似度（简单关键词重叠）───
-
-  /** 计算两条记忆的文本相似度 0~1 */
+  /** 计算两条记忆的文本相似度 0~1（overlap/min(|A|,|B|)，对「同一事实、详略不同」鲁棒） */
   similarity(a: string, b: string): number {
-    const wordsA = new Set(a.toLowerCase().split(/\W+/).filter(Boolean));
-    const wordsB = b.toLowerCase().split(/\W+/).filter(Boolean);
-    if (wordsA.size === 0 || wordsB.length === 0) return 0;
+    const na = normalizeText(a);
+    const nb = normalizeText(b);
+    if (na.length === 0 || nb.length === 0) return 0;
+    if (na === nb) return 1;
+    // 包含关系：较短串长度 >=6 且被另一条完整包含 → 视为重复
+    if (Math.min(na.length, nb.length) >= 6 && (na.includes(nb) || nb.includes(na))) return 1;
+    const sa = bigrams(a);
+    const sb = bigrams(b);
     let overlap = 0;
-    for (const w of wordsB) if (wordsA.has(w)) overlap++;
-    return overlap / Math.max(wordsA.size, wordsB.length);
+    for (const g of sa) if (sb.has(g)) overlap++;
+    return overlap / Math.min(sa.size, sb.size);
+  }
+
+  /**
+   * 统一入库闸门：检查新内容与全部记忆（含已归档）的重复程度。
+   * exact — 归一化后完全相同；high — 相似度 ≥0.8；mid — 相似度 ≥0.45；none — 无重复。
+   */
+  dedupeCheck(content: string): { level: DedupeLevel; matches: Array<{ entry: MemoryEntry; similarity: number }> } {
+    const norm = normalizeText(content);
+    const matches = this.getAll()
+      .map((m) => ({ entry: m, similarity: this.similarity(content, m.content), exact: normalizeText(m.content) === norm }))
+      .filter((s) => s.exact || s.similarity >= GATE_MID_THRESHOLD)
+      .sort((a, b) => b.similarity - a.similarity);
+
+    const exacts = matches.filter((m) => m.exact);
+    if (exacts.length > 0) {
+      return { level: "exact", matches: exacts.map(({ entry, similarity }) => ({ entry, similarity })) };
+    }
+    if (matches.length === 0) return { level: "none", matches: [] };
+    const level: DedupeLevel = matches[0].similarity >= GATE_HIGH_THRESHOLD ? "high" : "mid";
+    return { level, matches: matches.map(({ entry, similarity }) => ({ entry, similarity })) };
+  }
+
+  /**
+   * 存量去重：合并归一化精确重复（保留 potency 高者，paths/tags 取并集、accessCount 累加），
+   * 中高相似对（≥0.55）自动合并低 potency 到高 potency。不再创建冲突。
+   */
+  dedupeAll(): { merged: number } {
+    let merged = 0;
+    // ponytail: O(n²) 扫描，n 为记忆条数（百级以内）；量级变大再换索引
+    const sorted = [...this.data.memories].sort((a, b) => b.potency - a.potency);
+    const seen = new Map<string, MemoryEntry>();
+    const removeIds = new Set<string>();
+
+    for (const m of sorted) {
+      const norm = normalizeText(m.content);
+      const keeper = seen.get(norm);
+      if (keeper) {
+        keeper.paths = [...new Set([...keeper.paths, ...m.paths])];
+        keeper.tags = [...new Set([...keeper.tags, ...m.tags])];
+        keeper.accessCount += m.accessCount;
+        removeIds.add(m.id);
+        merged++;
+      } else {
+        seen.set(norm, m);
+      }
+    }
+    if (removeIds.size > 0) {
+      this.data.memories = this.data.memories.filter((m) => !removeIds.has(m.id));
+    }
+
+    // 中高相似（≥0.55，同一事实的措辞变体）→ 自动合并低 potency 到高 potency
+    // ponytail: 阈值覆盖原来的 conflict 区间（0.55~0.8），不再产生手动冲突
+    const sorted2 = [...this.data.memories].sort((a, b) => b.potency - a.potency);
+    const removeIds2 = new Set<string>();
+    for (let i = 0; i < sorted2.length; i++) {
+      if (removeIds2.has(sorted2[i].id)) continue;
+      for (let j = i + 1; j < sorted2.length; j++) {
+        if (removeIds2.has(sorted2[j].id)) continue;
+        if (this.similarity(sorted2[i].content, sorted2[j].content) >= DEDUPE_MERGE_THRESHOLD) {
+          sorted2[i].paths = [...new Set([...sorted2[i].paths, ...sorted2[j].paths])];
+          sorted2[i].tags = [...new Set([...sorted2[i].tags, ...sorted2[j].tags])];
+          sorted2[i].accessCount += sorted2[j].accessCount;
+          removeIds2.add(sorted2[j].id);
+          merged++;
+        }
+      }
+    }
+    if (removeIds2.size > 0) {
+      this.data.memories = this.data.memories.filter((m) => !removeIds2.has(m.id));
+    }
+
+    return { merged };
   }
 
   /** 找出一条新内容与已有记忆的冲突（相似度在冲突区间内） */

@@ -2,7 +2,7 @@
  * pi-memory-spaced — 间隔重复驱动的 Pi Agent 记忆系统
  *
  * 特性：
- * - 自动提取 + 冲突检测 + 即时确认
+ * - 自动提取 + 自动去重合并（零打扰）
  * - 间隔重复：效力分数随时间衰减，注入时增强
  * - 记忆宫殿：按文件路径关联检索记忆
  * - KV 缓存稳定：同一 session 内注入内容保持稳定
@@ -12,12 +12,13 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
 import { MemoryStore } from "./store.ts";
 import { MemoryInjector } from "./injector.ts";
 import { MemoryExtractor } from "./extractor.ts";
 import { writeIndexMd } from "./index-md.ts";
-import { extractPathsFromToolCalls, collectSessionPaths } from "./path-assoc.ts";
-import { registerCommands } from "./commands.ts";
+import { extractPathsFromToolCalls } from "./path-assoc.ts";
+import { registerCommands, updateMemoryWidget } from "./commands.ts";
 import { registerTools } from "./tools.ts";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -33,13 +34,22 @@ export default function (pi: ExtensionAPI) {
   // ─── session_start: 加载状态，执行衰减 ───
   pi.on("session_start", async (_event: any, ctx: any) => {
     sessionId = ctx.sessionManager?.getSessionId() ?? "unknown";
+    store.reload(); // 从磁盘重新加载，同步外部修改
+
+    // 存量去重：自动合并精确重复和中高相似记忆（≥0.55），零打扰
+    const dd = store.dedupeAll();
+    if (dd.merged > 0) {
+      ctx.ui.notify(`🧠 已合并 ${dd.merged} 条重复/相似记忆`, "info");
+    }
+
     store.applyDecay();
     store.save();
 
-    const data = { version: 1, updatedAt: Date.now(), memories: store.getAll(), conflicts: store.getConflicts() };
+    const data = { version: 1, updatedAt: Date.now(), memories: store.getAll() };
     writeIndexMd(storeDir, data);
 
     injector.invalidateSnapshot();
+    updateMemoryWidget(ctx, store);
     ctx.ui.setStatus("mem-spaced", `${store.getActive().length} 条记忆`);
   });
 
@@ -56,6 +66,17 @@ export default function (pi: ExtensionAPI) {
     const content = match?.[1] ?? simpleMatch?.[1] ?? cmdMatch;
     if (!content || content.length < 3) return;
 
+    // 入库闸门：任何级别的相似都走增强而非重复入库
+    const check = store.dedupeCheck(content);
+    if (check.level !== "none") {
+      const top = check.matches[0];
+      store.update(top.entry.id, { potency: Math.min(1.0, top.entry.potency + 0.1) });
+      store.save();
+      updateMemoryWidget(ctx, store);
+      ctx.ui.notify(`⚠️ 已有相似记忆（${(top.similarity * 100).toFixed(0)}%），已强化而非重复入库:\n${top.entry.content.slice(0, 80)}`, "info");
+      return { action: "handled" as const };
+    }
+
     // 直接存入记忆
     store.add({
       type: "preference",
@@ -67,8 +88,9 @@ export default function (pi: ExtensionAPI) {
       sourceSession: sessionId,
     });
     store.save();
+    updateMemoryWidget(ctx, store);
 
-    const data = { version: 1, updatedAt: Date.now(), memories: store.getAll(), conflicts: store.getConflicts() };
+    const data = { version: 1, updatedAt: Date.now(), memories: store.getAll() };
     writeIndexMd(storeDir, data);
     ctx.ui.setStatus("mem-spaced", `${store.getActive().length} 条记忆`);
     ctx.ui.notify(`✅ 已记住: ${content.slice(0, 80)}`, "info");
@@ -101,84 +123,36 @@ export default function (pi: ExtensionAPI) {
   // ─── session_before_compact: 刷新快照 ───
   pi.on("session_before_compact", async () => { injector.invalidateSnapshot(); });
 
-  // ─── agent_settled: 对话结束，自动提取 + 冲突确认 ───
+  // ─── agent_settled: 对话结束，自动提取 ───
+  // ponytail: 不再创建或弹窗冲突，提取器对中相似内容静默跳过，
+  // 存量去重自动合并。用户零打扰。
   pi.on("agent_settled", async (_event: any, ctx: any) => {
     try {
+      store.reload(); // 同步卡片/外部对 JSON 的修改
       const entries = ctx.sessionManager?.getBranch?.() ?? [];
       const messages = entries
         .filter((e: any) => e.type === "message")
         .map((e: any) => e.message)
         .filter(Boolean);
 
-      // 降低阈值：至少 2 条消息就尝试提取
       if (messages.length < 2) return;
 
       const result = await extractor.extract(messages, ctx.modelRegistry, sessionId);
-      if (result.added === 0 && result.conflicts === 0) return;
+      if (result.added === 0) return;
 
       store.save();
-      const data = { version: 1, updatedAt: Date.now(), memories: store.getAll(), conflicts: store.getConflicts() };
+      updateMemoryWidget(ctx, store);
+      const data = { version: 1, updatedAt: Date.now(), memories: store.getAll() };
       writeIndexMd(storeDir, data);
       ctx.ui.setStatus("mem-spaced", `${store.getActive().length} 条记忆`);
-
-      if (result.added > 0) {
-        ctx.ui.notify(`🧠 自动记忆: 新增 ${result.added} 条`, "info");
-      }
-
-      // 冲突即时确认（只在有 UI 时弹出）
-      if (result.conflicts > 0 && ctx.hasUI) {
-        const conflicts = store.getConflicts();
-        const latest = conflicts[conflicts.length - 1];
-        if (latest) {
-          const existing = store.getById(latest.existingId);
-          const msg =
-            `检测到潜在冲突:\n` +
-            `已有: ${existing?.content.slice(0, 80)}\n` +
-            `新: ${latest.newContent.slice(0, 80)}\n\n` +
-            `保留旧记忆还是接受新内容？`;
-
-          const choice = await ctx.ui.select(msg, [
-            { label: "保留旧记忆（忽略新内容）", value: "keep" },
-            { label: "接受新内容（替换旧记忆）", value: "replace" },
-            { label: "稍后决定（标记待确认）", value: "later" },
-          ]);
-
-          if (choice === "replace" && existing) {
-            store.remove(existing.id);
-            store.add({
-              type: existing.type,
-              content: latest.newContent,
-              paths: existing.paths,
-              potency: existing.potency + 0.1,
-              source: "auto",
-              tags: existing.tags,
-            });
-            store.resolveConflict(conflicts.length - 1);
-            store.save();
-            ctx.ui.notify("✅ 已更新记忆", "info");
-          } else if (choice === "keep") {
-            store.resolveConflict(conflicts.length - 1);
-            store.save();
-            ctx.ui.notify("已保留旧记忆", "info");
-          } else {
-            ctx.ui.notify(`⚠️ ${result.conflicts} 条冲突待确认，/mem:conflicts 查看`, "warning");
-          }
-
-          // 更新 MEMORY.md
-          const d2 = { version: 1, updatedAt: Date.now(), memories: store.getAll(), conflicts: store.getConflicts() };
-          writeIndexMd(storeDir, d2);
-          ctx.ui.setStatus("mem-spaced", `${store.getActive().length} 条记忆`);
-        }
-      } else if (result.conflicts > 0) {
-        ctx.ui.notify(`⚠️ 发现 ${result.conflicts} 条潜在冲突，/mem:conflicts 查看`, "warning");
-      }
+      ctx.ui.notify(`🧠 自动记忆: 新增 ${result.added} 条`, "info");
     } catch { /* 静默失败 */ }
   });
 
   // ─── session_shutdown: 持久化 ───
   pi.on("session_shutdown", async () => {
     store.save();
-    const data = { version: 1, updatedAt: Date.now(), memories: store.getAll(), conflicts: store.getConflicts() };
+    const data = { version: 1, updatedAt: Date.now(), memories: store.getAll() };
     writeIndexMd(storeDir, data);
   });
 

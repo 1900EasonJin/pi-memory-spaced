@@ -64,6 +64,17 @@ export function registerTools(pi: ExtensionAPI, store: MemoryStore): void {
       const validTypes = ["decision", "convention", "pattern", "preference", "fact", "lesson"];
       const type = validTypes.includes(params.type) ? params.type : "fact";
 
+      // 入库闸门：重复/高相似 → 增强已有，中相似 → 静默增强，不创建冲突
+      const check = store.dedupeCheck(params.content);
+      if (check.level !== "none") {
+        const top = check.matches[0];
+        store.update(top.entry.id, { potency: Math.min(1.0, top.entry.potency + 0.1) });
+        store.save();
+        return {
+          content: [{ type: "text" as const, text: `⚠️ 已有相似记忆（相似度 ${(top.similarity * 100).toFixed(0)}%），已强化而非重复入库：\n${top.entry.content.slice(0, 100)}` }],
+        };
+      }
+
       store.add({
         type: type as any,
         content: params.content.slice(0, 500),

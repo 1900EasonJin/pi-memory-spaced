@@ -61,22 +61,9 @@ export function generateIndexMd(data: MemoryStoreData, maxLines = 50): string {
     lines.push("");
   }
 
-  // 待确认冲突
-  if (data.conflicts.length > 0) {
-    lines.push("## ⚠️ 待确认冲突");
-    for (const c of data.conflicts) {
-      const existing = data.memories.find((m) => m.id === c.existingId);
-      if (existing) {
-        lines.push(`- 与 "${existing.content.slice(0, 60)}..." 相似度 ${(c.similarity * 100).toFixed(0)}%`);
-        lines.push(`  新: ${c.newContent.slice(0, 80)}`);
-      }
-    }
-    lines.push("");
-  }
-
   // 统计
   lines.push("---");
-  lines.push(`共 ${data.memories.length} 条记忆，活跃 ${active.length} 条，待确认冲突 ${data.conflicts.length} 条`);
+  lines.push(`共 ${data.memories.length} 条记忆，活跃 ${active.length} 条`);
 
   return lines.join("\n");
 }

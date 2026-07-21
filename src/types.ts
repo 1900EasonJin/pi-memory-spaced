@@ -17,18 +17,8 @@ export interface MemoryEntry {
   accessCount: number;
   source: "auto" | "manual" | "user";
   tags: string[];
-  /** 冲突条目 id 列表 */
-  conflictsWith: string[];
   /** 来源会话 id（auto 类型时记录） */
   sourceSession?: string;
-}
-
-/** 待确认的冲突 */
-export interface ConflictItem {
-  existingId: string;
-  newContent: string;
-  similarity: number;
-  detectedAt: number;
 }
 
 /** 持久化存储格式 */
@@ -36,7 +26,6 @@ export interface MemoryStoreData {
   version: number;
   updatedAt: number;
   memories: MemoryEntry[];
-  conflicts: ConflictItem[];
 }
 
 /** 注入配置 */
@@ -60,6 +49,9 @@ export const DEFAULT_INJECTION_CONFIG: InjectionConfig = {
   decayFactor: 0.95,
   archiveThreshold: 0.1,
 };
+
+/** 入库闸门判定级别 */
+export type DedupeLevel = "exact" | "high" | "mid" | "none";
 
 /** 提取结果 */
 export interface ExtractedFact {

@@ -165,7 +165,7 @@ function testMemoryMd() {
   store.add({ type: "decision", content: "JWT 认证方案认证方案认证方案", paths: [], potency: 0.9, source: "manual", tags: ["auth"] });
   store.add({ type: "convention", content: "Prisma ORM", paths: [], potency: 0.7, source: "manual", tags: ["database"] });
 
-  const data = { version: 1, updatedAt: Date.now(), memories: store.getAll(), conflicts: store.getConflicts() };
+  const data = { version: 1, updatedAt: Date.now(), memories: store.getAll() };
   const md = generateIndexMd(data);
 
   assert(md.includes("JWT 认证方案"), "INDEX.md 包含记忆内容");
@@ -205,6 +205,105 @@ function testArchive() {
   assert(store.getActive().length === 2, "归档条目不在活跃列表中");
 }
 
+// ─── 11. 中文相似度（2-gram Dice）───
+function testChineseSimilarity() {
+  console.log("\n📋 测试: 中文相似度");
+
+  const store = createTestStore();
+  // 完全相同
+  assert(store.similarity("用户偏好清晰直观的界面", "用户偏好清晰直观的界面") === 1, "纯中文相同 → 1.0");
+  // 近义（真实重复样本：同一事实、详略不同，overlap ≈0.52）
+  const simNear = store.similarity(
+    "提取器需要在同一批次内做去重：相似度 >=85% 视为重复跳过，避免 LLM 一次返回多条相似内容导致重复记忆。同时需要记录已解决冲突的哈希，防止 agent_settled 时重新加入。",
+    "提取器在同批次内对 LLM 返回的多个事实做相似度去重（≥85% 视为重复跳过），避免同一段对话提取出多条相似记忆。",
+  );
+  assert(simNear >= 0.45, `近义中文应 ≥0.45（实际 ${simNear.toFixed(2)}）`);
+  // 无关
+  const simDiff = store.similarity("这个项目使用 pnpm 作为包管理器", "记忆注入采用路径关联的宫殿机制");
+  assert(simDiff < 0.4, `无关内容应 <0.4（实际 ${simDiff.toFixed(2)}）`);
+  // 包含关系
+  assert(store.similarity("使用 pnpm 作为包管理器", "这个项目使用 pnpm 作为包管理器") === 1, "包含关系 → 1.0");
+  // 归一化：标点/空白差异不影响精确匹配
+  assert(store.similarity("记住： 这个项目，用 pnpm！", "记住这个项目用pnpm") === 1, "标点空白归一化后相同 → 1.0");
+}
+
+// ─── 12. 入库闸门 dedupeCheck ───
+function testDedupeGate() {
+  console.log("\n📋 测试: 入库闸门 dedupeCheck");
+
+  const store = createTestStore();
+  store.add({ type: "lesson", content: "提取器需要在同一批次内做去重：相似度 >=85% 视为重复跳过，避免 LLM 一次返回多条相似内容导致重复记忆。同时需要记录已解决冲突的哈希，防止 agent_settled 时重新加入。", paths: [], potency: 0.8, source: "manual", tags: [] });
+
+  // exact
+  const exact = store.dedupeCheck("提取器需要在同一批次内做去重：相似度 >=85% 视为重复跳过，避免 LLM 一次返回多条相似内容导致重复记忆。同时需要记录已解决冲突的哈希，防止 agent_settled 时重新加入。");
+  assert(exact.level === "exact", "完全相同 → exact");
+
+  // high / mid（真实近义样本，实测 overlap ≈0.52）
+  const near = store.dedupeCheck("提取器在同批次内对 LLM 返回的多个事实做相似度去重（≥85% 视为重复跳过），避免同一段对话提取出多条相似记忆。");
+  assert(near.level === "high" || near.level === "mid", `近义 → high/mid（实际 ${near.level} ${near.matches[0]?.similarity.toFixed(2)}）`);
+
+  // none
+  const none = store.dedupeCheck("燕麦多孔淀粉制备工艺研究");
+  assert(none.level === "none", "无关内容 → none");
+
+  // 已归档记忆也参与查重
+  const store2 = createTestStore();
+  const m = store2.add({ type: "fact", content: "一条快要被遗忘的记忆事实", paths: [], potency: 0.05, source: "auto", tags: [] });
+  assert(store2.getArchived().some((x) => x.id === m.id), "前置条件：该记忆已归档");
+  const archived = store2.dedupeCheck("一条快要被遗忘的记忆事实");
+  assert(archived.level === "exact", "已归档记忆也能被闸门命中");
+}
+
+// ─── 13. 存量去重 dedupeAll（自动合并）───
+function testDedupeAll() {
+  console.log("\n📋 测试: 存量去重 dedupeAll（自动合并，无冲突）");
+
+  const store = createTestStore();
+  // 精确重复（标点差异，归一化后相同），低 potency 的应被合并
+  const low = store.add({ type: "lesson", content: "MemSpacedCard 直接读写 memory-store.json 作为唯一数据源。", paths: ["/a.ts"], potency: 0.5, source: "auto", tags: ["a"] });
+  const high = store.add({ type: "fact", content: "MemSpacedCard直接读写memory-store.json作为唯一数据源", paths: ["/b.ts"], potency: 0.8, source: "manual", tags: ["b"] });
+  store.add({ type: "fact", content: "完全独立的另一条记忆内容", paths: [], potency: 0.7, source: "auto", tags: [] });
+
+  const result = store.dedupeAll();
+  assert(result.merged === 1, `合并 1 条精确重复（实际 ${result.merged}）`);
+  assert(store.getAll().length === 2, "剩余 2 条记忆");
+  const keeper = store.getById(high.id);
+  assert(keeper !== undefined, "保留 potency 高者");
+  assert(store.getById(low.id) === undefined, "低 potency 重复被移除");
+  assert(keeper!.paths.includes("/a.ts") && keeper!.paths.includes("/b.ts"), "paths 取并集");
+  assert(keeper!.tags.includes("a") && keeper!.tags.includes("b"), "tags 取并集");
+
+  // 中高相似（≥0.55）→ 自动合并，不再创建冲突
+  const store2 = createTestStore();
+  const m1 = store2.add({ type: "decision", content: "冲突解决按钮统一为三个：合并、另存、不采纳", paths: [], potency: 0.8, source: "auto", tags: [] });
+  store2.add({ type: "decision", content: "冲突解决操作确定为三个按钮：合并、另存、不采纳", paths: [], potency: 0.6, source: "auto", tags: [] });
+  const r2 = store2.dedupeAll();
+  assert(r2.merged === 1, `中高相似（≥0.55）自动合并（实际 merged=${r2.merged}）`);
+  assert(store2.getAll().length === 1, "合并后只剩 1 条");
+  const mergedKeeper = store2.getAll()[0];
+  assert(mergedKeeper.id === m1.id, "保留 potency 高者");
+  assert(mergedKeeper.potency === 0.8, "potency 保留最高值");
+  // 再跑一次无变化
+  const r3 = store2.dedupeAll();
+  assert(r3.merged === 0, "重复运行无变化");
+
+  // 极高相似（≥0.8，措辞变体）→ 自动合并
+  const store3 = createTestStore();
+  store3.add({ type: "decision", content: "存量去重 dedupeAll 自动合并精确重复记忆，高相似对记入冲突待确认。", paths: ["/a.ts"], potency: 0.8, source: "auto", tags: [] });
+  store3.add({ type: "decision", content: "存量去重 dedupeAll 自动合并精确重复的记忆，高相似对记入冲突待确认", paths: ["/b.ts"], potency: 0.6, source: "auto", tags: [] });
+  const r4 = store3.dedupeAll();
+  assert(r4.merged === 1, `极高相似自动合并（实际 merged=${r4.merged}）`);
+  assert(store3.getAll().length === 1, "合并后只剩 1 条");
+  assert(store3.getAll()[0].paths.length === 2, "paths 取并集");
+
+  // 相关但不同的存量记忆（<0.55）→ 不合并
+  const store4 = createTestStore();
+  store4.add({ type: "fact", content: "记忆数据持久化在 ~/.pi/agent/memory-store.json，索引文件为同一目录下的 INDEX.md", paths: [], potency: 0.8, source: "auto", tags: [] });
+  store4.add({ type: "lesson", content: "修改运行中插件的内存数据或 memory-store.json 无效：源码修改需重启 PiDeck 加载新代码", paths: [], potency: 0.8, source: "auto", tags: [] });
+  const r5 = store4.dedupeAll();
+  assert(r5.merged === 0, "相关但不同的记忆不合并（<0.55）");
+}
+
 // ─── 运行全部测试 ───
 console.log("🧪 pi-memory-spaced 核心测试");
 console.log("=".repeat(40));
@@ -215,6 +314,9 @@ testInjectionBoost();
 testPathRelevance();
 testSearch();
 testSimilarityAndConflict();
+testChineseSimilarity();
+testDedupeGate();
+testDedupeAll();
 testTopN();
 testMemoryMd();
 testPersistence();

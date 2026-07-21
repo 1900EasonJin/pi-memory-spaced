@@ -73,44 +73,41 @@ export class MemoryExtractor {
     messages: any[],
     modelRegistry: ModelRegistry,
     sessionId: string,
-  ): Promise<{ added: number; conflicts: number }> {
-    if (this.running) return { added: 0, conflicts: 0 };
-    if (messages.length < 2) return { added: 0, conflicts: 0 }; // 至少 2 条消息就尝试提取
+  ): Promise<{ added: number }> {
+    if (this.running) return { added: 0 };
+    if (messages.length < 2) return { added: 0 }; // 至少 2 条消息就尝试提取
 
     this.running = true;
     try {
       // 1. 序列化对话
       const conversationText = serializeMessages(messages);
-      if (conversationText.length < 100) return { added: 0, conflicts: 0 };
+      if (conversationText.length < 100) return { added: 0 };
 
       // 2. 获取 LLM 模型
       const model = modelRegistry.find("opencode-go", "deepseek-v4-flash")
         ?? modelRegistry.getAll().find((m) => m.reasoning === false);
 
-      if (!model) return { added: 0, conflicts: 0 };
+      if (!model) return { added: 0 };
 
       const auth = await modelRegistry.getApiKeyAndHeaders(model);
-      if (!auth.ok || !auth.apiKey) return { added: 0, conflicts: 0 };
+      if (!auth.ok || !auth.apiKey) return { added: 0 };
 
       // 3. 调用 LLM 提取
       const facts = await this.callLLM(model, auth, conversationText);
-      if (facts.length === 0) return { added: 0, conflicts: 0 };
+      if (facts.length === 0) return { added: 0 };
 
       // 4. 提取文件路径
       const paths = extractPathsFromMessages(messages);
 
-      // 5. 处理每个提取结果
+      // 5. 处理每个提取结果（统一走 store 入库闸门）
       let added = 0;
-      let conflicts = 0;
 
       for (const fact of facts) {
-        // 冲突检测
-        const conflictResults = this.store.findConflicts(fact.content, 0.55);
-        const highConflicts = conflictResults.filter((c) => c.similarity >= 0.75);
+        const check = this.store.dedupeCheck(fact.content);
 
-        if (highConflicts.length > 0) {
-          // 高度相似 → 已有，跳过（提升一下已有记忆的 potency 作为 passive boost）
-          for (const c of highConflicts) {
+        if (check.level === "exact" || check.level === "high") {
+          // 已有相同/高度相似记忆 → 跳过，被动增强已有记忆
+          for (const c of check.matches) {
             this.store.update(c.entry.id, {
               potency: Math.min(1.0, c.entry.potency + 0.05),
             });
@@ -118,18 +115,8 @@ export class MemoryExtractor {
           continue;
         }
 
-        const midConflicts = conflictResults.filter((c) => c.similarity >= 0.55);
-        if (midConflicts.length > 0) {
-          // 中度相似 → 可能冲突，记录待确认
-          for (const c of midConflicts) {
-            this.store.addConflict({
-              existingId: c.entry.id,
-              newContent: fact.content,
-              similarity: c.similarity,
-              detectedAt: Date.now(),
-            });
-            conflicts++;
-          }
+        if (check.level === "mid") {
+          // ponytail: 中相似 → 静默跳过
           continue;
         }
 
@@ -146,7 +133,7 @@ export class MemoryExtractor {
         added++;
       }
 
-      return { added, conflicts };
+      return { added };
     } finally {
       this.running = false;
     }
