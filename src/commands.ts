@@ -8,9 +8,9 @@
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text, Spacer } from "@earendil-works/pi-tui";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import type { MemoryStore } from "./store";
-import type { MemoryInjector } from "./injector";
-import type { MemoryEntry } from "./types";
+import type { MemoryStore } from "./store.ts";
+import type { MemoryInjector } from "./injector.ts";
+import type { MemoryEntry } from "./types.ts";
 
 const TYPE_ICON: Record<string, string> = {
   decision: "🎯",
@@ -164,9 +164,10 @@ async function showMemoryDetail(
 export function updateMemoryWidget(ctx: { ui: { setWidget: (id: string, content: string[] | undefined) => void; theme?: { fg: (color: string, text: string) => string } } }, store: MemoryStore): void {
   const active = store.getActive();
   const lowEff = store.getLowEfficiency();
+  const archived = store.getArchived();
   const tenured = store.getTenured();
 
-  if (active.length === 0 && lowEff.length === 0 && tenured.length === 0) {
+  if (store.getAll().length === 0) {
     ctx.ui.setWidget("mem-spaced", undefined);
     return;
   }
@@ -174,29 +175,38 @@ export function updateMemoryWidget(ctx: { ui: { setWidget: (id: string, content:
   const parts: string[] = [];
   if (active.length > 0) parts.push(`${active.length} 活跃`);
   if (lowEff.length > 0) parts.push(`${lowEff.length} 低效`);
+  if (archived.length > 0) parts.push(`${archived.length} 归档`);
   if (tenured.length > 0) parts.push(`🔒 ${tenured.length} 固化`);
 
   ctx.ui.setWidget("mem-spaced", [`🧠 ${parts.join(" · ")}`]);
 }
 
-export function registerCommands(pi: any, store: MemoryStore, injector: MemoryInjector): void {
+type RefreshMemoryUi = (ctx: any) => void;
+
+export function registerCommands(
+  pi: any,
+  store: MemoryStore,
+  injector: MemoryInjector,
+  refreshMemoryUi?: RefreshMemoryUi,
+): void {
 
   // ── /mem:status ──
   pi.registerCommand("mem:status", {
     description: "查看记忆系统状态概览",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
+      store.reloadIfChanged();
       const all = store.getAll();
       const active = store.getActive();
       const lowEff = store.getLowEfficiency();
       const top5 = store.getTopN(5);
       const snapshot = injector.getCurrentSnapshot();
 
-      if (!ctx.hasUI) {
+      if (ctx.mode !== "tui") {
         // ── 非 TUI fallback ──
         const tenured = store.getTenured();
         const lines: string[] = [];
         lines.push("🧠 记忆系统状态");
-        lines.push(`总条目: ${all.length} | 活跃: ${active.length} | 低效: ${lowEff.length} | 🔒 固化: ${tenured.length} | 已斩杀: ${store.getPrunedCount()} 条`);
+        lines.push(`总条目: ${all.length} | 活跃: ${active.length} | 低效: ${lowEff.length} | 已归档: ${store.getArchived().length} | 🔒 固化: ${tenured.length}`);
         lines.push(`当前注入快照: ${snapshot ? `${snapshot.injectedIds.length} 条, ${snapshot.tokensUsed} tokens` : "无"}`);
         lines.push("");
         lines.push("Top-5 高优先级:");
@@ -219,7 +229,7 @@ export function registerCommands(pi: any, store: MemoryStore, injector: MemoryIn
         // 统计行
         const tenured = store.getTenured();
         container.addChild(new Text(`总条目: ${theme.fg("accent", String(all.length))}`, 1, 0));
-        container.addChild(new Text(`活跃: ${theme.fg("success", String(active.length))} · 低效: ${theme.fg("warning", String(store.getLowEfficiency().length))} · 🔒 固化: ${theme.fg("accent", String(tenured.length))} · 已斩杀: ${theme.fg("dim", String(store.getPrunedCount()))} 条`, 1, 0));
+        container.addChild(new Text(`活跃: ${theme.fg("success", String(active.length))} · 低效: ${theme.fg("warning", String(store.getLowEfficiency().length))} · 已归档: ${theme.fg("dim", String(store.getArchived().length))} · 🔒 固化: ${theme.fg("accent", String(tenured.length))}`, 1, 0));
         container.addChild(new Text(
           `注入快照: ${snapshot ? `${snapshot.injectedIds.length} 条, ${snapshot.tokensUsed} tokens` : "无"}`,
           1, 0,
@@ -256,13 +266,14 @@ export function registerCommands(pi: any, store: MemoryStore, injector: MemoryIn
   pi.registerCommand("mem:list", {
     description: "列出所有活跃记忆（按效力排序），交互式浏览",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
+      store.reloadIfChanged();
       const active = store.getActive().sort((a, b) => b.potency - a.potency);
       if (active.length === 0) {
         ctx.ui.notify("📭 暂无活跃记忆", "info");
         return;
       }
 
-      if (!ctx.hasUI) {
+      if (ctx.mode !== "tui") {
         // ── 非 TUI fallback ──
         const lines: string[] = [`📋 活跃记忆 (${active.length} 条)\n`];
         for (const m of active) {
@@ -279,6 +290,7 @@ export function registerCommands(pi: any, store: MemoryStore, injector: MemoryIn
 
       // ── TUI 交互式浏览 ──
       await browseMemoryList(store, ctx, active, `📋 活跃记忆 (${active.length} 条)`);
+      refreshMemoryUi?.(ctx);
     },
   });
 
@@ -286,6 +298,7 @@ export function registerCommands(pi: any, store: MemoryStore, injector: MemoryIn
   pi.registerCommand("mem:search", {
     description: "搜索记忆（关键词） — 用法: /mem:search <关键词>",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
+      store.reloadIfChanged();
       if (!args?.trim()) {
         ctx.ui.notify("请输入搜索关键词: /mem:search <关键词>", "warning");
         return;
@@ -297,7 +310,7 @@ export function registerCommands(pi: any, store: MemoryStore, injector: MemoryIn
         return;
       }
 
-      if (!ctx.hasUI) {
+      if (ctx.mode !== "tui") {
         // ── 非 TUI fallback ──
         const lines: string[] = [`🔍 搜索结果: "${args.trim()}" (${results.length} 条)\n`];
         for (const m of results) {
@@ -310,6 +323,7 @@ export function registerCommands(pi: any, store: MemoryStore, injector: MemoryIn
 
       // ── TUI 交互式浏览 ──
       await browseMemoryList(store, ctx, results, `🔍 搜索结果: "${args.trim()}" (${results.length} 条)`);
+      refreshMemoryUi?.(ctx);
     },
   });
 
@@ -317,6 +331,7 @@ export function registerCommands(pi: any, store: MemoryStore, injector: MemoryIn
   pi.registerCommand("mem:forget", {
     description: "删除一条记忆 — 用法: /mem:forget <id>（无 ID 则交互式选择）",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
+      store.reloadIfChanged();
       const id = args?.trim();
 
       if (id) {
@@ -332,15 +347,14 @@ export function registerCommands(pi: any, store: MemoryStore, injector: MemoryIn
           if (!ok) { ctx.ui.notify("已取消", "info"); return; }
         }
 
-        store.remove(id);
-        store.save();
-        updateMemoryWidget(ctx, store);
+        store.mutate(() => store.remove(id));
+        refreshMemoryUi?.(ctx);
         ctx.ui.notify(`已删除: ${m.content.slice(0, 60)}`, "info");
         return;
       }
 
       // 无 ID → 交互式选择
-      if (!ctx.hasUI) {
+      if (ctx.mode !== "tui") {
         ctx.ui.notify("用法: /mem:forget <id>（交互模式仅在 TUI 下可用）", "warning");
         return;
       }
@@ -360,9 +374,8 @@ export function registerCommands(pi: any, store: MemoryStore, injector: MemoryIn
       const ok = await ctx.ui.confirm("确认删除?", `确定删除: ${m.content.slice(0, 60)}?`);
       if (!ok) { ctx.ui.notify("已取消", "info"); return; }
 
-      store.remove(pickedId);
-      store.save();
-      updateMemoryWidget(ctx, store);
+      store.mutate(() => store.remove(pickedId));
+      refreshMemoryUi?.(ctx);
       ctx.ui.notify(`已删除: ${m.content.slice(0, 60)}`, "info");
     },
   });
@@ -371,6 +384,7 @@ export function registerCommands(pi: any, store: MemoryStore, injector: MemoryIn
   pi.registerCommand("mem:add", {
     description: "手动添加记忆 — 用法: /mem:add <类型> <内容>（类型: decision/convention/pattern/preference/fact/lesson）",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
+      store.reloadIfChanged();
       if (!args?.trim()) {
         ctx.ui.notify("用法: /mem:add <类型> <内容>", "warning");
         return;
@@ -390,25 +404,31 @@ export function registerCommands(pi: any, store: MemoryStore, injector: MemoryIn
         return;
       }
 
-      // 入库闸门：任何级别相似都走增强而非重复入库
-      const check = store.dedupeCheck(content);
-      if (check.level !== "none") {
-        const top = check.matches[0];
-        store.update(top.entry.id, { potency: Math.min(1.0, top.entry.potency + 0.1) });
-        store.save();
-        ctx.ui.notify(
-          `⚠️ 已有相似记忆（${(top.similarity * 100).toFixed(0)}%），已强化:\n${top.entry.content.slice(0, 60)}`,
-          "info",
-        );
-        return;
+      const result = store.mutate(() => {
+        const check = store.dedupeCheck(content);
+        if (check.level === "exact") {
+          const top = check.matches[0];
+          store.update(top.entry.id, { potency: Math.min(1, top.entry.potency + 0.1) });
+          return { duplicate: top.entry.content };
+        }
+        store.add({
+          type,
+          content: content.slice(0, store.getConfig().maxMemoryLength),
+          paths: [],
+          potency: 0.8,
+          source: "manual",
+          tags: [],
+        });
+        return { duplicate: undefined };
+      });
+      refreshMemoryUi?.(ctx);
+
+      if (result.duplicate) {
+        ctx.ui.notify(`⚠️ 已有完全相同记忆，已强化:\n${result.duplicate.slice(0, 60)}`, "info");
+      } else {
+        const label = TYPE_LABEL[type] ?? type;
+        ctx.ui.notify(`已添加 ${label}: ${content.slice(0, 60)}`, "info");
       }
-
-      store.add({ type, content, paths: [], potency: 0.8, source: "manual", tags: [] });
-      store.save();
-      updateMemoryWidget(ctx, store);
-
-      const label = TYPE_LABEL[type] ?? type;
-      ctx.ui.notify(`已添加 ${label}: ${content.slice(0, 60)}`, "info");
     },
   });
 
@@ -440,8 +460,7 @@ async function browseMemoryList(
     if (action === "delete") {
       const ok = await ctx.ui.confirm("确认删除?", `确定删除此记忆？\n${m.content.slice(0, 60)}`);
       if (ok) {
-        store.remove(m.id);
-        store.save();
+        store.mutate(() => store.remove(m.id));
         updateMemoryWidget(ctx, store);
         ctx.ui.notify(`已删除: ${m.content.slice(0, 60)}`, "info");
         // 从当前列表移除

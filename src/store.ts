@@ -1,12 +1,31 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { randomUUID, createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import type { MemoryEntry, MemoryStoreData, InjectionConfig, DedupeLevel } from "./types.ts";
 import { DEFAULT_INJECTION_CONFIG } from "./types.ts";
 
-let _idCounter = 0;
 function genId(): string {
-  return `mem_${Date.now().toString(36)}_${(++_idCounter).toString(36)}`;
+  return `mem_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
+}
+
+const VALID_TYPES = new Set(["decision", "convention", "pattern", "preference", "fact", "lesson"]);
+const VALID_SOURCES = new Set(["auto", "manual", "user"]);
+const SOURCE_PRIORITY = { auto: 0, manual: 1, user: 2 } as const;
+const LOCK_WAIT_ARRAY = new Int32Array(new SharedArrayBuffer(4));
+
+function contentHash(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
 }
 
 /** 简单 hash：取字符编码和 */
@@ -37,9 +56,6 @@ function bigrams(s: string): Set<string> {
 /** 入库闸门阈值（overlap 系数实测：重复对 0.52~0.66，相关但不同 0.35~0.38，无关 <0.1） */
 export const GATE_HIGH_THRESHOLD = 0.8;
 export const GATE_MID_THRESHOLD = 0.45;
-/** 存量自动合并的阈值，与入库闸门 high 对齐：≥0.8 十分相似才合并，0.45~0.8 允许并存 */
-export const DEDUPE_MERGE_THRESHOLD = GATE_HIGH_THRESHOLD;
-
 /**
  * Memory Store — 纯文件系统持久化，间隔重复驱动
  *
@@ -50,40 +66,171 @@ export class MemoryStore {
   private config: InjectionConfig;
   private storePath: string;
   private dirPath: string;
+  private lockPath: string;
+  private diskHash = "";
+  private revision = 0;
 
   constructor(opts?: { storePath?: string; config?: Partial<InjectionConfig> }) {
     this.config = { ...DEFAULT_INJECTION_CONFIG, ...opts?.config };
     this.storePath = opts?.storePath ?? join(homedir(), ".pi", "agent", "memory-store.json");
     this.dirPath = dirname(this.storePath);
-    this.data = this.load();
+    this.lockPath = `${this.storePath}.lock`;
+    const loaded = this.load();
+    this.data = loaded.data;
+    this.diskHash = loaded.hash;
   }
 
   // ─── 持久化 ───
 
-  private load(): MemoryStoreData {
-    // ponytail: 旧 JSON 可能残留 conflicts/resolvedSources 字段，运行时忽略即可
-    if (!existsSync(this.storePath)) {
-      return { version: 1, updatedAt: Date.now(), memories: [], prunedCount: 0 };
-    }
+  private emptyData(): MemoryStoreData {
+    return { version: 1, updatedAt: Date.now(), memories: [], prunedCount: 0, resolvedSources: [] };
+  }
+
+  private load(): { data: MemoryStoreData; hash: string } {
+    if (!existsSync(this.storePath)) return { data: this.emptyData(), hash: "" };
+
+    const raw = readFileSync(this.storePath, "utf-8");
+    let parsed: unknown;
     try {
-      const raw = readFileSync(this.storePath, "utf-8");
-      const data = JSON.parse(raw) as MemoryStoreData;
-      if (data.prunedCount === undefined) data.prunedCount = 0; // 兼容旧数据
-      return data;
-    } catch {
-      return { version: 1, updatedAt: Date.now(), memories: [], prunedCount: 0 };
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      throw new Error(`记忆库 JSON 损坏: ${this.storePath}`, { cause: error });
     }
+
+    if (!parsed || typeof parsed !== "object" || !Array.isArray((parsed as MemoryStoreData).memories)) {
+      throw new Error(`记忆库格式无效: ${this.storePath}`);
+    }
+
+    const now = Date.now();
+    const source = parsed as MemoryStoreData;
+    const memories = source.memories
+      .filter((m) => m && typeof m === "object" && typeof m.content === "string")
+      .map((m) => {
+        const createdAt = Number.isFinite(m.createdAt) ? m.createdAt : now;
+        const lastInjectedAt = Number.isFinite(m.lastInjectedAt) ? m.lastInjectedAt : createdAt;
+        return {
+          ...m,
+          id: typeof m.id === "string" && m.id ? m.id : genId(),
+          type: VALID_TYPES.has(m.type) ? m.type : "fact",
+          content: m.content.slice(0, this.config.maxMemoryLength),
+          paths: Array.isArray(m.paths) ? m.paths.filter((p): p is string => typeof p === "string") : [],
+          potency: Number.isFinite(m.potency) ? Math.max(0, Math.min(1, m.potency)) : 0.8,
+          createdAt,
+          lastInjectedAt,
+          lastDecayedAt: Number.isFinite(m.lastDecayedAt) ? m.lastDecayedAt : lastInjectedAt,
+          accessCount: Number.isFinite(m.accessCount) ? Math.max(0, Math.floor(m.accessCount)) : 0,
+          source: VALID_SOURCES.has(m.source) ? m.source : "auto",
+          tags: Array.isArray(m.tags) ? m.tags.filter((t): t is string => typeof t === "string") : [],
+          tenured: m.tenured === true || undefined,
+        } as MemoryEntry;
+      });
+
+    return {
+      data: {
+        ...source,
+        version: 1,
+        updatedAt: Number.isFinite(source.updatedAt) ? source.updatedAt : now,
+        memories,
+        prunedCount: Number.isFinite(source.prunedCount) ? source.prunedCount : 0,
+        resolvedSources: Array.isArray(source.resolvedSources)
+          ? source.resolvedSources.filter((hash): hash is string => typeof hash === "string")
+          : [],
+      },
+      hash: contentHash(raw),
+    };
+  }
+
+  private saveAtomic(): void {
+    this.data.updatedAt = Date.now();
+    mkdirSync(this.dirPath, { recursive: true });
+    const serialized = JSON.stringify(this.data, null, 2);
+    const tempPath = `${this.storePath}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(tempPath, serialized, { encoding: "utf-8", mode: 0o600 });
+      renameSync(tempPath, this.storePath);
+      this.diskHash = contentHash(serialized);
+    } finally {
+      if (existsSync(tempPath)) unlinkSync(tempPath);
+    }
+  }
+
+  private acquireLock(): () => void {
+    mkdirSync(this.dirPath, { recursive: true });
+    const deadline = Date.now() + 2_000;
+    let fd: number | undefined;
+
+    while (fd === undefined) {
+      try {
+        fd = openSync(this.lockPath, "wx", 0o600);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        try {
+          if (Date.now() - statSync(this.lockPath).mtimeMs > 10_000) unlinkSync(this.lockPath);
+        } catch { /* 竞争方可能已释放锁 */ }
+        if (Date.now() >= deadline) throw new Error(`记忆库写锁超时: ${this.lockPath}`);
+        Atomics.wait(LOCK_WAIT_ARRAY, 0, 0, 10);
+      }
+    }
+
+    return () => {
+      closeSync(fd);
+      try { unlinkSync(this.lockPath); } catch { /* 已被清理 */ }
+    };
   }
 
   save(): void {
-    this.data.updatedAt = Date.now();
-    mkdirSync(this.dirPath, { recursive: true });
-    writeFileSync(this.storePath, JSON.stringify(this.data, null, 2), "utf-8");
+    this.saveAtomic();
   }
 
-  /** 从磁盘重新加载（外部修改后同步内存状态） */
-  reload(): void {
-    this.data = this.load();
+  /** 从磁盘重新加载；内容发生变化时递增 revision。 */
+  reload(): boolean {
+    const loaded = this.load();
+    const changed = loaded.hash !== this.diskHash;
+    this.data = loaded.data;
+    this.diskHash = loaded.hash;
+    if (changed) this.revision++;
+    return changed;
+  }
+
+  reloadIfChanged(): boolean {
+    const hash = existsSync(this.storePath) ? contentHash(readFileSync(this.storePath, "utf-8")) : "";
+    return hash !== this.diskHash ? this.reload() : false;
+  }
+
+  getRevision(): number {
+    return this.revision;
+  }
+
+  getConfig(): Readonly<InjectionConfig> {
+    return this.config;
+  }
+
+  /**
+   * 基于磁盘最新版本执行一次原子读改写。扩展中的所有生产写入都走此入口。
+   * ponytail: 单文件全局锁足够当前低频写入；写入量显著增长时再拆分存储。
+   */
+  mutate<T>(mutator: () => T): T {
+    const release = this.acquireLock();
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        this.reload();
+        const baseHash = this.diskHash;
+        const result = mutator();
+        const currentHash = existsSync(this.storePath)
+          ? contentHash(readFileSync(this.storePath, "utf-8"))
+          : "";
+        if (currentHash !== baseHash) continue;
+        this.saveAtomic();
+        return result;
+      }
+      throw new Error("记忆库在写入期间持续变化，请稍后重试");
+    } finally {
+      release();
+    }
+  }
+
+  private markChanged(): void {
+    this.revision++;
   }
 
   // ─── 查询 ───
@@ -96,7 +243,7 @@ export class MemoryStore {
     return this.data.memories.find((m) => m.id === id);
   }
 
-  /** 获取可注入记忆（固化记忆 + 未斩杀竞争记忆，含低效） */
+  /** 获取可注入记忆（固化记忆 + 未归档记忆，含低效） */
   getInjectable(): MemoryEntry[] {
     return this.data.memories.filter((m) => m.tenured || m.potency >= this.config.archiveThreshold);
   }
@@ -106,19 +253,19 @@ export class MemoryStore {
     return this.data.memories.filter((m) => m.tenured || m.potency >= this.config.lowEfficiencyThreshold);
   }
 
-  /** 获取低效记忆（斩杀线 ≤ potency < 低效线，仍可注入） */
+  /** 获取低效记忆（归档线 ≤ potency < 低效线，仍可注入） */
   getLowEfficiency(): MemoryEntry[] {
     return this.data.memories.filter((m) => !m.tenured && m.potency >= this.config.archiveThreshold && m.potency < this.config.lowEfficiencyThreshold);
+  }
+
+  /** 获取已归档记忆（保留在 Store，但不参与自动注入） */
+  getArchived(): MemoryEntry[] {
+    return this.data.memories.filter((m) => !m.tenured && m.potency < this.config.archiveThreshold);
   }
 
   /** 获取已固化记忆 */
   getTenured(): MemoryEntry[] {
     return this.data.memories.filter((m) => m.tenured);
-  }
-
-  /** 获取累计斩杀的低效记忆条数 */
-  getPrunedCount(): number {
-    return this.data.prunedCount ?? 0;
   }
 
   /** 按效力排序取 Top-N（从全部可注入记忆中选，含低效） */
@@ -128,22 +275,40 @@ export class MemoryStore {
       .slice(0, n);
   }
 
-  /** 按路径关联度 + 效力排序（从全部可注入记忆中选，含低效） */
+  /** 按路径关联度 + 效力排序；没有真实路径命中的记忆不参与本阶段。 */
   getRelevantToPaths(targetPaths: string[], limit: number): MemoryEntry[] {
+    const normalizePath = (path: string) => path.replace(/\\/g, "/").replace(/\/$/, "");
+    const related = (a: string, b: string) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+    const normalizedTargets = targetPaths.map(normalizePath);
     const scored = this.getInjectable().map((m) => {
       let pathScore = 0;
-      for (const tp of targetPaths) {
-        for (const mp of m.paths) {
-          if (tp === mp) pathScore += 1.0;
-          else if (tp.startsWith(mp) || mp.startsWith(tp)) pathScore += 0.5;
+      for (const target of normalizedTargets) {
+        for (const memoryPath of m.paths.map(normalizePath)) {
+          if (target === memoryPath) pathScore += 1;
+          else if (related(target, memoryPath)) pathScore += 0.5;
         }
       }
-      return { entry: m, score: m.potency * 0.6 + Math.min(pathScore, 1.0) * 0.4 };
+      return { entry: m, pathScore, score: m.potency * 0.6 + Math.min(pathScore, 1) * 0.4 };
     });
     return scored
+      .filter((item) => item.pathScore > 0)
       .sort((a, b) => b.score - a.score)
       .slice(0, limit)
-      .map((s) => s.entry);
+      .map((item) => item.entry);
+  }
+
+  isResolvedContent(content: string): boolean {
+    const hashes = this.data.resolvedSources ?? [];
+    return hashes.includes(simpleHash(content)) || hashes.includes(simpleHash(normalizeText(content)));
+  }
+
+  markResolvedContent(content: string): void {
+    const hash = simpleHash(normalizeText(content));
+    this.data.resolvedSources ??= [];
+    if (!this.data.resolvedSources.includes(hash)) {
+      this.data.resolvedSources.push(hash);
+      this.markChanged();
+    }
   }
 
   /** 关键词搜索 */
@@ -158,37 +323,36 @@ export class MemoryStore {
 
   // ─── 间隔重复算法 ───
 
-  /** 对所有记忆执行时间衰减（固化记忆跳过），衰减后斩杀低效记忆 */
-  applyDecay(): void {
-    const now = Date.now();
+  /** 对所有记忆执行一次增量衰减；归档记忆保留在 Store 中。 */
+  applyDecay(now = Date.now()): void {
+    let changed = false;
     for (const m of this.data.memories) {
       if (m.tenured) continue;
-      const daysSince = (now - m.lastInjectedAt) / (86_400_000);
-      m.potency *= Math.pow(this.config.decayFactor, daysSince);
-      m.potency = Math.max(0, Math.min(1.0, m.potency));
+      const anchor = m.lastDecayedAt ?? m.lastInjectedAt ?? m.createdAt;
+      const daysSince = Math.max(0, (now - anchor) / 86_400_000);
+      if (daysSince > 0) {
+        m.potency = Math.max(0, Math.min(1, m.potency * Math.pow(this.config.decayFactor, daysSince)));
+        changed = true;
+      }
+      if (m.lastDecayedAt !== now) {
+        m.lastDecayedAt = now;
+        changed = true;
+      }
     }
-    this.pruneLowPotency();
-  }
-
-  /** 斩杀：删除所有 potency 低于阈值的非固化记忆，返回本次删了多少 */
-  pruneLowPotency(): { deleted: number } {
-    const before = this.data.memories.length;
-    this.data.memories = this.data.memories.filter((m) => m.tenured || m.potency >= this.config.archiveThreshold);
-    const deleted = before - this.data.memories.length;
-    if (deleted > 0) this.data.prunedCount = (this.data.prunedCount ?? 0) + deleted;
-    return { deleted };
+    if (changed) this.markChanged();
   }
 
   /** 标记一条记忆被注入（提升 potency，达到阈值后自动固化） */
   registerInjection(id: string): void {
     const m = this.getById(id);
     if (!m) return;
+    const now = Date.now();
     m.potency = Math.min(1.0, m.potency + this.config.potencyBoost);
-    m.lastInjectedAt = Date.now();
+    m.lastInjectedAt = now;
+    m.lastDecayedAt = now;
     m.accessCount++;
-    if (!m.tenured && m.accessCount >= this.config.tenureThreshold) {
-      m.tenured = true;
-    }
+    if (!m.tenured && m.accessCount >= this.config.tenureThreshold) m.tenured = true;
+    this.markChanged();
   }
 
   /** 批量标记注入 */
@@ -205,10 +369,12 @@ export class MemoryStore {
       id: genId(),
       potency: entry.potency ?? 0.8,
       createdAt: now,
-      lastInjectedAt: now,  // 初始化为创建时间，避免衰减从 1970 开始
+      lastInjectedAt: now,
+      lastDecayedAt: now,
       accessCount: 0,
     };
     this.data.memories.push(mem);
+    this.markChanged();
     return mem;
   }
 
@@ -216,6 +382,7 @@ export class MemoryStore {
     const idx = this.data.memories.findIndex((m) => m.id === id);
     if (idx === -1) return false;
     this.data.memories.splice(idx, 1);
+    this.markChanged();
     return true;
   }
 
@@ -223,6 +390,7 @@ export class MemoryStore {
     const m = this.getById(id);
     if (!m) return false;
     Object.assign(m, patch);
+    this.markChanged();
     return true;
   }
 
@@ -263,55 +431,44 @@ export class MemoryStore {
     return { level, matches: matches.map(({ entry, similarity }) => ({ entry, similarity })) };
   }
 
-  /**
-   * 存量去重：合并归一化精确重复（保留 potency 高者，paths/tags 取并集、accessCount 累加），
-   * 中高相似对（≥0.55）自动合并低 potency 到高 potency。不再创建冲突。
-   */
+  /** 自动合并归一化后完全相同的条目；相似内容可能是纠正或冲突，不自动删除。 */
   dedupeAll(): { merged: number } {
     let merged = 0;
-    // ponytail: O(n²) 扫描，n 为记忆条数（百级以内）；量级变大再换索引
     const sorted = [...this.data.memories].sort((a, b) => b.potency - a.potency);
     const seen = new Map<string, MemoryEntry>();
     const removeIds = new Set<string>();
 
-    for (const m of sorted) {
-      const norm = normalizeText(m.content);
-      const keeper = seen.get(norm);
-      if (keeper) {
-        keeper.paths = [...new Set([...keeper.paths, ...m.paths])];
-        keeper.tags = [...new Set([...keeper.tags, ...m.tags])];
-        keeper.accessCount += m.accessCount;
-        removeIds.add(m.id);
-        merged++;
-      } else {
-        seen.set(norm, m);
+    for (const memory of sorted) {
+      const normalized = normalizeText(memory.content);
+      const keeper = seen.get(normalized);
+      if (!keeper) {
+        seen.set(normalized, memory);
+        continue;
       }
+
+      const preferredSource = SOURCE_PRIORITY[memory.source] > SOURCE_PRIORITY[keeper.source] ? memory : keeper;
+      keeper.paths = [...new Set([...keeper.paths, ...memory.paths])];
+      keeper.tags = [...new Set([...keeper.tags, ...memory.tags])];
+      keeper.potency = Math.max(keeper.potency, memory.potency);
+      keeper.createdAt = Math.min(keeper.createdAt, memory.createdAt);
+      keeper.lastInjectedAt = Math.max(keeper.lastInjectedAt, memory.lastInjectedAt);
+      keeper.lastDecayedAt = Math.max(
+        keeper.lastDecayedAt ?? keeper.lastInjectedAt,
+        memory.lastDecayedAt ?? memory.lastInjectedAt,
+      );
+      keeper.accessCount += memory.accessCount;
+      keeper.tenured = keeper.tenured || memory.tenured || keeper.accessCount >= this.config.tenureThreshold || undefined;
+      keeper.source = preferredSource.source;
+      keeper.type = preferredSource.type;
+      keeper.sourceSession = preferredSource.sourceSession ?? keeper.sourceSession;
+      removeIds.add(memory.id);
+      merged++;
     }
+
     if (removeIds.size > 0) {
-      this.data.memories = this.data.memories.filter((m) => !removeIds.has(m.id));
+      this.data.memories = this.data.memories.filter((memory) => !removeIds.has(memory.id));
+      this.markChanged();
     }
-
-    // 十分相似（≥0.8，同一事实的措辞变体）→ 自动合并低 potency 到高 potency
-    // ponytail: 阈值与入库闸门 high 一致，mid 区间（0.45~0.8）作为独立记忆保留
-    const sorted2 = [...this.data.memories].sort((a, b) => b.potency - a.potency);
-    const removeIds2 = new Set<string>();
-    for (let i = 0; i < sorted2.length; i++) {
-      if (removeIds2.has(sorted2[i].id)) continue;
-      for (let j = i + 1; j < sorted2.length; j++) {
-        if (removeIds2.has(sorted2[j].id)) continue;
-        if (this.similarity(sorted2[i].content, sorted2[j].content) >= DEDUPE_MERGE_THRESHOLD) {
-          sorted2[i].paths = [...new Set([...sorted2[i].paths, ...sorted2[j].paths])];
-          sorted2[i].tags = [...new Set([...sorted2[i].tags, ...sorted2[j].tags])];
-          sorted2[i].accessCount += sorted2[j].accessCount;
-          removeIds2.add(sorted2[j].id);
-          merged++;
-        }
-      }
-    }
-    if (removeIds2.size > 0) {
-      this.data.memories = this.data.memories.filter((m) => !removeIds2.has(m.id));
-    }
-
     return { merged };
   }
 

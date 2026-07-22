@@ -25,7 +25,7 @@ function assert(condition: boolean, msg: string) {
 function createTestStore(): MemoryStore {
   return new MemoryStore({
     storePath: `/tmp/pi-memory-test-${Date.now()}-${Math.random()}.json`,
-    config: { decayFactor: 0.95 }, // 略高于斩杀线 0.2 即可验证衰减
+    config: { decayFactor: 0.95 },
   });
 }
 
@@ -56,8 +56,9 @@ function testDecay() {
   const store = createTestStore();
   const m = store.add({ type: "fact", content: "Node.js >= 18", paths: [], potency: 0.8, source: "manual", tags: [] });
 
-  // 修改 lastInjectedAt 为 2 天前
-  store.update(m.id, { lastInjectedAt: Date.now() - 2 * 86_400_000 });
+  // 修改衰减基准为 2 天前
+  const twoDaysAgo = Date.now() - 2 * 86_400_000;
+  store.update(m.id, { lastInjectedAt: twoDaysAgo, lastDecayedAt: twoDaysAgo });
 
   store.applyDecay();
   const after = store.getById(m.id)!;
@@ -66,7 +67,8 @@ function testDecay() {
 
   // 用新条目测试更长时间的衰减
   const m2 = store.add({ type: "fact", content: "test2", paths: [], potency: 0.8, source: "manual", tags: [] });
-  store.update(m2.id, { lastInjectedAt: Date.now() - 10 * 86_400_000 });
+  const tenDaysAgo = Date.now() - 10 * 86_400_000;
+  store.update(m2.id, { lastInjectedAt: tenDaysAgo, lastDecayedAt: tenDaysAgo });
   store.applyDecay();
   const afterLong = store.getById(m2.id)!;
   assert(afterLong.potency < store.getById(m.id)!.potency, "10 天未使用比 2 天未使用衰减更多");
@@ -107,7 +109,7 @@ function testPathRelevance() {
 
   // 查询无关联路径
   const irrelevant = store.getRelevantToPaths(["src/unknown/file.ts"], 5);
-  assert(irrelevant.length > 0, "即使无关联也返回通用记忆");
+  assert(irrelevant.length === 0, "无路径命中时不混入普通 Top-N");
 }
 
 // ─── 5. 搜索 ───
@@ -189,26 +191,23 @@ function testPersistence() {
   assert(store2.getAll()[0].content === "持久化测试", "重新加载后内容正确");
 }
 
-// ─── 10. 斩杀过滤 ───
+// ─── 10. 归档过滤 ───
 function testArchive() {
-  console.log("\n📋 测试: 三级分类（活跃/低效/斩杀）");
+  console.log("\n📋 测试: 三级分类（活跃/低效/归档）");
 
   const store = createTestStore();
   store.add({ type: "fact", content: "活跃记忆", paths: [], potency: 0.8, source: "manual", tags: [] });
-  store.add({ type: "fact", content: "低效记忆", paths: [], potency: 0.15, source: "manual", tags: [] });
-  store.add({ type: "fact", content: "斩杀线记忆", paths: [], potency: 0.06, source: "manual", tags: [] });
+  store.add({ type: "fact", content: "低效记忆", paths: [], potency: 0.12, source: "manual", tags: [] });
+  store.add({ type: "fact", content: "归档记忆", paths: [], potency: 0.06, source: "manual", tags: [] });
 
-  // getActive 只返回 potency >= 0.2 的
   assert(store.getActive().length === 1, "活跃: 只有 0.8 的");
-  // getLowEfficiency 返回 0.05~0.2 之间的
-  assert(store.getLowEfficiency().length === 2, "低效: 0.15 和 0.06 都算");
-  // getInjectable 返回全部 >= 0.05 的（含低效）
-  assert(store.getInjectable().length === 3, "可注入: 全部 3 条");
+  assert(store.getLowEfficiency().length === 1, "低效: 0.10~0.15 的 1 条");
+  assert(store.getArchived().length === 1, "归档: 低于 0.10 的 1 条");
+  assert(store.getInjectable().length === 2, "可注入: 活跃和低效共 2 条");
 
-  // 再加一条低于斩杀线的
-  store.add({ type: "fact", content: "被斩杀", paths: [], potency: 0.04, source: "manual", tags: [] });
-  assert(store.getAll().length === 4, "低于斩杀线的仍存在（衰减时才删）");
-  assert(store.getInjectable().length === 3, "但不可注入");
+  store.applyDecay();
+  assert(store.getAll().length === 3, "衰减后归档记忆仍保留");
+  assert(store.getInjectable().length === 2, "归档记忆不可注入");
 }
 
 // ─── 11. 中文相似度（2-gram Dice）───
@@ -252,7 +251,7 @@ function testDedupeGate() {
   const none = store.dedupeCheck("燕麦多孔淀粉制备工艺研究");
   assert(none.level === "none", "无关内容 → none");
 
-  // 低效记忆（potency 低于斩杀线）也参与查重
+  // 已归档记忆也参与查重
   const store2 = createTestStore();
   const m = store2.add({ type: "fact", content: "一条快要被遗忘的记忆事实", paths: [], potency: 0.05, source: "auto", tags: [] });
   assert(store2.getAll().some((x) => x.id === m.id), "前置条件：该记忆存在");
@@ -287,14 +286,13 @@ function testDedupeAll() {
   assert(r2.merged === 0, `中相似不合并（实际 merged=${r2.merged}）`);
   assert(store2.getAll().length === 2, "两条均保留");
 
-  // 极高相似（≥0.8，措辞变体）→ 自动合并
+  // 极高相似也可能是纠正或否定，只自动合并精确重复
   const store3 = createTestStore();
-  store3.add({ type: "decision", content: "存量去重 dedupeAll 自动合并精确重复记忆，高相似对记入冲突待确认。", paths: ["/a.ts"], potency: 0.8, source: "auto", tags: [] });
-  store3.add({ type: "decision", content: "存量去重 dedupeAll 自动合并精确重复的记忆，高相似对记入冲突待确认", paths: ["/b.ts"], potency: 0.6, source: "auto", tags: [] });
+  store3.add({ type: "decision", content: "存量去重只自动合并精确重复记忆，高相似项保留。", paths: ["/a.ts"], potency: 0.8, source: "auto", tags: [] });
+  store3.add({ type: "decision", content: "存量去重只自动合并精确重复的记忆，高相似项保留", paths: ["/b.ts"], potency: 0.6, source: "auto", tags: [] });
   const r4 = store3.dedupeAll();
-  assert(r4.merged === 1, `极高相似自动合并（实际 merged=${r4.merged}）`);
-  assert(store3.getAll().length === 1, "合并后只剩 1 条");
-  assert(store3.getAll()[0].paths.length === 2, "paths 取并集");
+  assert(r4.merged === 0, `非精确内容不自动合并（实际 merged=${r4.merged}）`);
+  assert(store3.getAll().length === 2, "两条高相似内容均保留");
 
   // 相关但不同的存量记忆（<0.55）→ 不合并
   const store4 = createTestStore();

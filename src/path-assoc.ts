@@ -17,10 +17,6 @@ function extractPathsFromToolCalls(toolCalls: Array<{ name: string; args: Record
     if (tc.name === "read" && tc.args.path) paths.add(tc.args.path);
     if (tc.name === "edit" && tc.args.path) paths.add(tc.args.path);
     if (tc.name === "write" && tc.args.path) paths.add(tc.args.path);
-    if (tc.name === "bash" && typeof tc.args.command === "string") {
-      const matches = tc.args.command.match(/(?:\/[\w.-]+)+/g);
-      if (matches) for (const m of matches) paths.add(m);
-    }
   }
   return [...paths];
 }

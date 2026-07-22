@@ -13,6 +13,8 @@ export interface MemoryEntry {
   createdAt: number;
   /** 上次成功注入时间 */
   lastInjectedAt: number;
+  /** 上次完成衰减计算的时间，避免同一时间段重复衰减 */
+  lastDecayedAt?: number;
   /** 累计注入次数 */
   accessCount: number;
   source: "auto" | "manual" | "user";
@@ -28,8 +30,10 @@ export interface MemoryStoreData {
   version: number;
   updatedAt: number;
   memories: MemoryEntry[];
-  /** 累计斩杀的低效记忆条数 */
+  /** 旧版累计删除计数，仅为数据兼容保留 */
   prunedCount?: number;
+  /** 旧版冲突 UI 写入的已处理内容哈希 */
+  resolvedSources?: string[];
 }
 
 /** 注入配置 */
@@ -42,9 +46,9 @@ export interface InjectionConfig {
   potencyBoost: number;
   /** 每日衰减因子 */
   decayFactor: number;
-  /** 斩杀阈值（potency 低于此值的非固化记忆直接删除） */
+  /** 归档阈值（potency 低于此值的非固化记忆保留但不注入） */
   archiveThreshold: number;
-  /** 低效阈值（potency 低于此值但高于斩杀线的记忆标记为低效，仍可注入） */
+  /** 低效阈值（potency 低于此值但高于归档线的记忆仍可注入） */
   lowEfficiencyThreshold: number;
   /** 固化阈值（accessCount ≥ 此值后自动晋升为永久记忆） */
   tenureThreshold: number;
@@ -55,8 +59,8 @@ export const DEFAULT_INJECTION_CONFIG: InjectionConfig = {
   maxMemoryLength: 500,
   potencyBoost: 0.3,
   decayFactor: 0.95,
-  archiveThreshold: 0.05,
-  lowEfficiencyThreshold: 0.2,
+  archiveThreshold: 0.1,
+  lowEfficiencyThreshold: 0.15,
   tenureThreshold: 50,
 };
 

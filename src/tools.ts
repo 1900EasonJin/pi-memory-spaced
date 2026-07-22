@@ -1,8 +1,10 @@
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { MemoryStore } from "./store";
+import type { MemoryStore } from "./store.ts";
 
-export function registerTools(pi: ExtensionAPI, store: MemoryStore): void {
+type RefreshMemoryUi = (ctx: any) => void;
+
+export function registerTools(pi: ExtensionAPI, store: MemoryStore, refreshMemoryUi?: RefreshMemoryUi): void {
   // memory_recall — LLM 可用，搜索记忆
   pi.registerTool({
     name: "memory_recall",
@@ -15,10 +17,12 @@ export function registerTools(pi: ExtensionAPI, store: MemoryStore): void {
     ],
     parameters: Type.Object({
       query: Type.String({ description: "搜索关键词（项目名、技术栈、功能模块等）" }),
-      limit: Type.Optional(Type.Integer({ description: "返回结果数量上限", default: 5 })),
+      limit: Type.Optional(Type.Integer({ description: "返回结果数量上限", default: 5, minimum: 1, maximum: 20 })),
     }),
     async execute(_toolCallId: string, params: { query: string; limit?: number }, _signal: any, _onUpdate: any) {
-      const results = store.search(params.query).slice(0, params.limit ?? 5);
+      store.reloadIfChanged();
+      const limit = Math.max(1, Math.min(20, params.limit ?? 5));
+      const results = store.search(params.query).slice(0, limit);
       if (results.length === 0) {
         return {
           content: [{ type: "text" as const, text: "未找到相关记忆。" }],
@@ -34,11 +38,11 @@ export function registerTools(pi: ExtensionAPI, store: MemoryStore): void {
           m.type === "fact" ? "📌 事实" : "💡 经验";
         const tenuredMark = m.tenured ? " 🔒" : "";
         return `${i + 1}.${tenuredMark} ${typeLabel}: ${m.content}` +
-          (m.paths.length > 0 ? `\n   关联路径: ${m.paths.join(", ")}` : "");
+          (m.paths.length > 0 ? `\n   关联路径: ${m.paths.slice(0, 5).join(", ")}` : "");
       }).join("\n\n");
 
       return {
-        content: [{ type: "text" as const, text: `找到 ${results.length} 条相关记忆:\n\n${text}` }],
+        content: [{ type: "text" as const, text: `找到 ${results.length} 条相关记忆:\n\n${text}`.slice(0, 12_000) }],
       };
     },
   });
@@ -61,33 +65,39 @@ export function registerTools(pi: ExtensionAPI, store: MemoryStore): void {
     }),
     async execute(_toolCallId: string, params: {
       type: string; content: string; paths?: string[]; tags?: string[];
-    }, _signal: any, _onUpdate: any) {
+    }, _signal: any, _onUpdate: any, ctx: any) {
       const validTypes = ["decision", "convention", "pattern", "preference", "fact", "lesson"];
       const type = validTypes.includes(params.type) ? params.type : "fact";
+      const content = params.content.trim().slice(0, store.getConfig().maxMemoryLength);
+      if (content.length < 3) throw new Error("记忆内容至少需要 3 个字符");
 
-      // 入库闸门：重复/高相似 → 增强已有，中相似 → 静默增强，不创建冲突
-      const check = store.dedupeCheck(params.content);
-      if (check.level !== "none") {
-        const top = check.matches[0];
-        store.update(top.entry.id, { potency: Math.min(1.0, top.entry.potency + 0.1) });
-        store.save();
-        return {
-          content: [{ type: "text" as const, text: `⚠️ 已有相似记忆（相似度 ${(top.similarity * 100).toFixed(0)}%），已强化而非重复入库：\n${top.entry.content.slice(0, 100)}` }],
-        };
-      }
+      const result = store.mutate(() => {
+        const check = store.dedupeCheck(content);
+        if (check.level === "exact") {
+          const top = check.matches[0];
+          store.update(top.entry.id, { potency: Math.min(1, top.entry.potency + 0.1) });
+          return { duplicate: top.entry.content };
+        }
 
-      store.add({
-        type: type as any,
-        content: params.content.slice(0, 500),
-        paths: params.paths ?? [],
-        potency: 0.8,
-        source: "manual",
-        tags: params.tags ?? [],
+        store.add({
+          type: type as any,
+          content,
+          paths: (params.paths ?? []).filter((path) => typeof path === "string").slice(0, 20),
+          potency: 0.8,
+          source: "manual",
+          tags: (params.tags ?? []).filter((tag) => typeof tag === "string").slice(0, 5),
+        });
+        return { duplicate: undefined };
       });
-      store.save();
+      refreshMemoryUi?.(ctx);
 
       return {
-        content: [{ type: "text" as const, text: `✅ 已记住: ${params.content.slice(0, 100)}` }],
+        content: [{
+          type: "text" as const,
+          text: result.duplicate
+            ? `⚠️ 已有完全相同记忆，已强化：\n${result.duplicate.slice(0, 100)}`
+            : `✅ 已记住: ${content.slice(0, 100)}`,
+        }],
       };
     },
   });
