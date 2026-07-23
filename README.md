@@ -1,8 +1,12 @@
 # pi-memory-spaced 🧠
 
+[English README](./README_EN.md)
+
 间隔重复驱动的 Pi Agent 记忆系统。
 
 > 让 Pi Agent 拥有真正"会遗忘"的记忆——重要的事反复出现，不重要的事自动沉底。
+
+专为 [PiDeck](https://github.com/ayuayue/PiDeck) 桌面环境优化，也可在纯 Pi CLI 中使用。
 
 ## 安装
 
@@ -86,7 +90,7 @@ Agent 在对话中可主动调用：
 
 ## PiDeck UI 特性
 
-插件为 PiDeck 桌面环境做了专门优化：
+插件为 [PiDeck](https://github.com/ayuayue/PiDeck) 桌面环境做了专门优化：
 
 ### 持久状态 Widget
 输入框上方始终显示记忆统计：
