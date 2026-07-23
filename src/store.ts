@@ -205,6 +205,10 @@ export class MemoryStore {
     return this.config;
   }
 
+  getStorePath(): string {
+    return this.storePath;
+  }
+
   /**
    * 基于磁盘最新版本执行一次原子读改写。扩展中的所有生产写入都走此入口。
    * ponytail: 单文件全局锁足够当前低频写入；写入量显著增长时再拆分存储。

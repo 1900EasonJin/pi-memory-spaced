@@ -139,8 +139,17 @@ export class MemoryExtractor {
             continue;
           }
 
-          // 自动提取不裁决高相似项，避免把纠正或否定误合并进旧记忆。
-          if (check.level === "high") continue;
+          // 高相似：不新增条目，合并强化旧记忆。内容保持旧条目原文
+          //（高相似但可能是纠正，不冒险改写内容），只并集 paths/tags 并提升 potency。
+          if (check.level === "high") {
+            const existingMemory = check.matches[0].entry;
+            this.store.update(existingMemory.id, {
+              potency: Math.min(1, existingMemory.potency + 0.05),
+              paths: [...new Set([...existingMemory.paths, ...messagePaths, ...fact.paths])],
+              tags: [...new Set([...existingMemory.tags, ...fact.tags])],
+            });
+            continue;
+          }
 
           this.store.add({
             type: fact.type,
@@ -162,28 +171,8 @@ export class MemoryExtractor {
   }
 
   private async callLLM(model: any, provider: any, auth: any, conversation: string): Promise<ExtractedFact[]> {
+    const text = await callSimpleLLM(model, provider, auth, EXTRACT_PROMPT, conversation);
     try {
-      const requestModel = auth.auth.baseUrl ? { ...model, baseUrl: auth.auth.baseUrl } : model;
-      const response = await provider.streamSimple(
-        requestModel,
-        {
-          systemPrompt: EXTRACT_PROMPT,
-          messages: [{ role: "user", content: conversation, timestamp: Date.now() }],
-        },
-        {
-          apiKey: auth.auth.apiKey,
-          headers: auth.auth.headers,
-          env: auth.env,
-          temperature: 0.1,
-          maxTokens: 2000,
-          signal: AbortSignal.timeout(30_000),
-        },
-      ).result();
-
-      const text = response.content
-        .filter((item: any) => item.type === "text")
-        .map((item: any) => item.text)
-        .join("\n");
       const jsonMatch = text.match(/\[[\s\S]*\]/);
       if (!jsonMatch) return [];
       const parsed = JSON.parse(jsonMatch[0]);
@@ -192,5 +181,40 @@ export class MemoryExtractor {
     } catch {
       return [];
     }
+  }
+}
+
+/** 通用轻量 LLM 调用：systemPrompt + 单条 user 消息，返回文本；失败返回空串。 */
+export async function callSimpleLLM(
+  model: any,
+  provider: any,
+  auth: any,
+  systemPrompt: string,
+  userContent: string,
+): Promise<string> {
+  try {
+    const requestModel = auth.auth.baseUrl ? { ...model, baseUrl: auth.auth.baseUrl } : model;
+    const response = await provider.streamSimple(
+      requestModel,
+      {
+        systemPrompt,
+        messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
+      },
+      {
+        apiKey: auth.auth.apiKey,
+        headers: auth.auth.headers,
+        env: auth.env,
+        temperature: 0.1,
+        maxTokens: 2000,
+        signal: AbortSignal.timeout(30_000),
+      },
+    ).result();
+
+    return response.content
+      .filter((item: any) => item.type === "text")
+      .map((item: any) => item.text)
+      .join("\n");
+  } catch {
+    return "";
   }
 }

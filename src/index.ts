@@ -16,6 +16,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { MemoryStore } from "./store.ts";
 import { MemoryInjector } from "./injector.ts";
 import { MemoryExtractor } from "./extractor.ts";
+import { MemoryConsolidator } from "./consolidator.ts";
 import { writeIndexMd } from "./index-md.ts";
 import { accumulateToolCallPath, drainAccumulatedPaths } from "./path-assoc.ts";
 import { registerCommands, updateMemoryWidget } from "./commands.ts";
@@ -28,7 +29,10 @@ export default function (pi: ExtensionAPI) {
   const store = new MemoryStore({ storePath: join(storeDir, "memory-store.json") });
   const injector = new MemoryInjector(store);
   const extractor = new MemoryExtractor(store);
+  const consolidator = new MemoryConsolidator(store);
   let sessionId = "";
+  // 上次整合时间（会话内存即可：重启后补跑一次成本低，无簇时不产生 LLM 调用）
+  let lastConsolidatedAt = 0;
 
   const refreshMemoryUi = (ctx: any): void => {
     writeIndexMd(
@@ -126,6 +130,20 @@ export default function (pi: ExtensionAPI) {
       store.reloadIfChanged();
       refreshMemoryUi(ctx);
       if (result.added > 0) ctx.ui.notify(`🧠 自动记忆: 新增 ${result.added} 条`, "info");
+
+      // 整合触发：本轮有新增且记忆偏多，或距上次整合超过 24 小时
+      const dueForConsolidation =
+        (result.added > 0 && store.getActive().length > 30) ||
+        Date.now() - lastConsolidatedAt > 24 * 3600_000;
+      if (dueForConsolidation) {
+        const consolidation = await consolidator.consolidate(ctx.modelRegistry, sessionId, ctx.model);
+        lastConsolidatedAt = Date.now();
+        store.reloadIfChanged();
+        refreshMemoryUi(ctx);
+        if (consolidation.merged > 0) {
+          ctx.ui.notify(`🧠 记忆整合: ${consolidation.removed} 条 → ${consolidation.merged} 条（已备份）`, "info");
+        }
+      }
     } catch (error) {
       ctx.ui.notify(`⚠️ 记忆提取异常: ${error}`, "error");
     }
