@@ -133,7 +133,7 @@ export default function (pi: ExtensionAPI) {
 
       // 整合触发：本轮有新增且记忆偏多，或距上次整合超过 24 小时
       const dueForConsolidation =
-        (result.added > 0 && store.getActive().length > 30) ||
+        (result.added > 0 && store.getActive().length > 15) ||
         Date.now() - lastConsolidatedAt > 24 * 3600_000;
       if (dueForConsolidation) {
         const consolidation = await consolidator.consolidate(ctx.modelRegistry, sessionId, ctx.model);

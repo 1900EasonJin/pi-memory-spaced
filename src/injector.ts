@@ -78,8 +78,8 @@ export class MemoryInjector {
         tokensUsed += cost;
       };
 
-      // 固化记忆只使用固定预算，不再回流到普通竞争池。
-      const tenured = this.store.getTenured();
+      // 固化记忆只使用固定预算，不再回流到普通竞争池；按 potency 降序，高价值优先占预算。
+      const tenured = [...this.store.getTenured()].sort((a, b) => b.potency - a.potency);
       const tenuredIds = new Set(tenured.map((memory) => memory.id));
       const tenuredBudget = Math.min(300, Math.floor(tokenBudget * 0.15));
       for (const memory of tenured) addWithinBudget(memory, tenuredBudget);

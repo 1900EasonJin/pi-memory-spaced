@@ -131,8 +131,31 @@ async function testLlmVeto() {
   assert(store.getAll().length === before, "否决后条目数不变");
 }
 
+// ─── 6. 固化记忆参与合并，结果继承 tenured 与 accessCount ───
+async function testTenuredConsolidation() {
+  console.log("\n📋 测试: 固化记忆合并");
+  const { store } = createStore();
+  const a = store.add({ type: "preference", content: "PPT字体大小偏好：主标题约18-20px，正文紧凑，中心词约26px", paths: ["ppt/"], potency: 0.9, source: "auto", tags: ["ppt"] });
+  const b = store.add({ type: "preference", content: "PPT字体偏好：主标题18-20px，中心词26px，分支标题约18px", paths: ["slides/"], potency: 0.8, source: "auto", tags: ["font"] });
+  store.update(a.id, { tenured: true, accessCount: 60 });
+  store.update(b.id, { accessCount: 30 });
+  store.save();
+
+  const consolidator = new MemoryConsolidator(store);
+  const clusters = consolidator.findClusters();
+  assert(clusters.length === 1 && clusters[0]?.length === 2, "固化记忆应参与聚类");
+
+  const result = await consolidator.consolidate(mockRegistry, "s", mockModel);
+  assert(result.merged === 1 && result.removed === 2, `固化合并 2→1，实际 merged=${result.merged} removed=${result.removed}`);
+  const merged = store.getAll()[0];
+  assert(merged?.tenured === true, "合并结果继承 tenured");
+  assert(merged?.accessCount === 90, `accessCount 求和 60+30=90，实际 ${merged?.accessCount}`);
+  assert(merged?.potency === 0.9, "potency 取簇内最大值");
+}
+
 async function main() {
   testFindClusters();
+  await testTenuredConsolidation();
   await testDryRun();
   await testConsolidate();
   await testLlmFailure();

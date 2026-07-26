@@ -5,7 +5,8 @@
  * 「mid 档（0.45~0.8）相关记忆只增不合」导致的堆积问题。
  *
  * 安全规则：
- * - source === "user"（口语「记住：」）和已固化记忆不参与自动合并
+ * - source === "user"（口语「记住：」）不参与自动合并；固化记忆可参与，
+ *   合并结果继承 tenured 标记与 accessCount 总和（固化不等于不可整理）
  * - 落库前自动备份 memory-store.json → memory-store.backup.json
  * - LLM 失败或返回非法结果时跳过该簇，不做任何修改
  * - dryRun 模式只返回合并计划，不写库
@@ -59,10 +60,11 @@ export class MemoryConsolidator {
 
   /**
    * 相似度聚类（并查集）。只返回 ≥2 条的簇。
-   * user 来源和固化记忆不参与（ ponytail: 它们优先级最高，措辞不应被 LLM 改写）。
+   * 仅 user 来源不参与（口语「记住：」优先级最高，措辞不应被 LLM 改写）；
+   * 固化记忆参与聚类——它们恰是长期堆积的主体。
    */
   findClusters(): MemoryEntry[][] {
-    const candidates = this.store.getActive().filter((m) => m.source !== "user" && !m.tenured);
+    const candidates = this.store.getActive().filter((m) => m.source !== "user");
     const parent = candidates.map((_, i) => i);
     const find = (i: number): number => {
       while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; }
@@ -150,7 +152,7 @@ export class MemoryConsolidator {
           const alive = plan.removed.filter((m) => this.store.getById(m.id));
           if (alive.length < 2) continue;
 
-          this.store.add({
+          const addedEntry = this.store.add({
             type: alive[0].type,
             content: plan.mergedContent,
             paths: [...new Set(alive.flatMap((m) => m.paths))].slice(0, 20),
@@ -159,6 +161,12 @@ export class MemoryConsolidator {
             tags: [...new Set(alive.flatMap((m) => m.tags))].slice(0, 5),
             sourceSession: sessionId,
           });
+          // 继承固化状态与累计注入次数：簇内任一条固化则结果固化
+          const totalAccess = alive.reduce((sum, m) => sum + m.accessCount, 0);
+          const anyTenured = alive.some((m) => m.tenured);
+          if (anyTenured || totalAccess > 0) {
+            this.store.update(addedEntry.id, { accessCount: totalAccess, tenured: anyTenured || undefined });
+          }
           for (const m of alive) this.store.remove(m.id);
           merged++;
           removed += alive.length;
