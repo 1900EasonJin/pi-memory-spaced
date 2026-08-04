@@ -82,10 +82,16 @@ export function registerTools(pi: ExtensionAPI, store: MemoryStore, refreshMemor
         store.add({
           type: type as any,
           content,
-          paths: (params.paths ?? []).filter((path) => typeof path === "string").slice(0, 20),
+          paths: (params.paths ?? [])
+            .filter((path) => typeof path === "string")
+            .map((path) => path.slice(0, 500))
+            .slice(0, 20),
           potency: 0.8,
           source: "manual",
-          tags: (params.tags ?? []).filter((tag) => typeof tag === "string").slice(0, 5),
+          tags: (params.tags ?? [])
+            .filter((tag) => typeof tag === "string")
+            .map((tag) => tag.slice(0, 50))
+            .slice(0, 5),
         });
         return { duplicate: undefined };
       });

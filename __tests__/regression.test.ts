@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { MemoryStore, normalizeText, simpleHash } from "../src/store.ts";
 import { MemoryInjector } from "../src/injector.ts";
@@ -242,6 +242,127 @@ console.log("\n📋 阈值和索引必须一致");
   addFact(store, "索引中的低效记忆", 0.12);
   const md = generateIndexMd({ version: 1, updatedAt: Date.now(), memories: store.getAll() });
   assert(md.includes("索引中的低效记忆"), "MEMORY.md 使用同一归档阈值");
+}
+
+console.log("\n📋 输入边界与不可变字段必须受保护");
+{
+  // 空内容拒绝
+  const store = createStore("add-guard");
+  let threw = false;
+  try {
+    (store as any).add({ type: "fact", content: "   ", paths: [], potency: 0.8, source: "auto", tags: [] });
+  } catch (e) {
+    threw = e instanceof TypeError;
+  }
+  assert(threw, "空内容 add 抛 TypeError");
+
+  // update 不允许覆写 id
+  const guardStore = createStore("update-guard");
+  const m = addFact(guardStore, "受保护的记忆");
+  guardStore.update(m.id, { id: "hacked-id" } as any);
+  assert(guardStore.getById(m.id) !== undefined && guardStore.getById("hacked-id") === undefined, "update 不能覆写 id");
+
+  // update 空内容拒绝（与 add 一致的输入边界）
+  let threwUpdate = false;
+  try {
+    guardStore.update(m.id, { content: "   " } as any);
+  } catch (e) {
+    threwUpdate = e instanceof TypeError;
+  }
+  assert(threwUpdate, "update 空白内容抛 TypeError");
+  assert(guardStore.getById(m.id)!.content === "受保护的记忆", "被拒绝的更新不修改原内容");
+
+  // update 超长内容截断到 maxMemoryLength
+  const updateCapStore = createStore("update-cap");
+  const m2 = addFact(updateCapStore, "原始内容");
+  updateCapStore.update(m2.id, { content: "y".repeat(600) });
+  const updated = updateCapStore.getById(m2.id)!;
+  assert(updated.content.length === 500, `update 内容截断到 maxMemoryLength（实际 ${updated.content.length}）`);
+  assert(updated.content === "y".repeat(500), "截断后的内容正确");
+}
+
+console.log("\n📋 旧格式/损坏记录必须宽容读取，且加载不截断长内容");
+{
+  // 损坏单条记录：跳过坏条目，保留好条目
+  const mixedPath = tempPath("mixed-corrupt");
+  writeFileSync(mixedPath, JSON.stringify({
+    version: 1,
+    updatedAt: Date.now(),
+    memories: [null, { content: 123 }, { id: "good", content: "完好的记忆", type: "fact", potency: 0.8, paths: [], tags: [], source: "auto", createdAt: Date.now(), lastInjectedAt: Date.now(), accessCount: 0 }],
+  }));
+  const mixedStore = new MemoryStore({ storePath: mixedPath });
+  assert(mixedStore.getAll().length === 1 && mixedStore.getById("good") !== undefined, "坏单条记录被跳过而非清空存储");
+
+  // 超长内容加载不截断（截断会在下次保存时永久写回）
+  const longContent = "长记忆".repeat(300); // 900 字符 > maxMemoryLength(500)
+  const longPath = tempPath("long-content");
+  writeFileSync(longPath, JSON.stringify({
+    version: 1,
+    updatedAt: Date.now(),
+    memories: [{ id: "long", content: longContent, type: "fact", potency: 0.8, paths: [], tags: [], source: "auto", createdAt: Date.now(), lastInjectedAt: Date.now(), accessCount: 0 }],
+  }));
+  const longStore = new MemoryStore({ storePath: longPath });
+  assert(longStore.getById("long")?.content.length === longContent.length, "加载不截断既有长记忆");
+  longStore.mutate(() => addFact(longStore, "触发一次保存"));
+  const onDisk = JSON.parse(readFileSync(longPath, "utf8"));
+  assert(onDisk.memories.find((x: any) => x.id === "long").content.length === longContent.length, "保存后长记忆仍完整（不被截断写回）");
+
+  // 新增内容超限时才截断
+  const capStore = createStore("cap-guard");
+  const capped = capStore.add({ type: "fact", content: "x".repeat(600), paths: [], potency: 0.8, source: "auto", tags: [] });
+  assert(capped.content.length === 500, "新增内容截断到 maxMemoryLength");
+}
+
+console.log("\n📋 mutate 无实际变化不得写盘");
+{
+  const noopPath = tempPath("noop-mutate");
+  const noopStore = new MemoryStore({ storePath: noopPath });
+  noopStore.mutate(() => { /* 只读 mutator */ });
+  assert(!existsSync(noopPath), "空库 + 无变化 mutate 不创建文件");
+
+  const emptyDecay = createStore("empty-decay");
+  emptyDecay.save();
+  const beforeHash = readFileSync(emptyDecay.getStorePath(), "utf8");
+  emptyDecay.mutate(() => emptyDecay.applyDecay());
+  assert(readFileSync(emptyDecay.getStorePath(), "utf8") === beforeHash, "空库衰减不重写文件");
+}
+
+console.log("\n📋 高相似提取不得覆写旧记忆（补充/否定无法区分）");
+{
+  const activeModel = { provider: "p", id: "m" };
+  const messages = [
+    { role: "user", content: "请记住项目的依赖管理约定。".repeat(20) },
+    { role: "assistant", content: [{ type: "text", text: "已经记录依赖管理约定。".repeat(20) }] },
+  ];
+  const makeRegistry = (factContent: string) => ({
+    getProvider: () => ({
+      streamSimple: () => ({
+        result: async () => ({
+          content: [{ type: "text", text: JSON.stringify([{ type: "fact", content: factContent, paths: [], tags: [] }]) }],
+        }),
+      }),
+    }),
+    getProviderAuth: async () => ({ auth: { apiKey: "test" } }),
+  });
+
+  // 反例：新内容包含旧文本，但语义是否定/纠正 → 不得覆写旧记忆
+  const negationStore = createStore("extract-negation");
+  addFact(negationStore, "统一使用 pnpm 管理依赖");
+  negationStore.save();
+  const negResult = await new (extractor as any).MemoryExtractor(negationStore)
+    .extract(messages, makeRegistry("不要统一使用 pnpm 管理依赖"), "session", activeModel);
+  const negAll = negationStore.getAll();
+  assert(negResult.added === 0 && negAll.length === 1, "否定语义高相似不新增条目");
+  assert(negAll[0].content === "统一使用 pnpm 管理依赖", "否定语义高相似不覆写旧记忆");
+
+  // 完整超集补充：同样不得覆写（保守保留，旧记忆不被模糊覆盖）
+  const superStore = createStore("extract-superset");
+  addFact(superStore, "统一使用 pnpm 管理依赖");
+  superStore.save();
+  await new (extractor as any).MemoryExtractor(superStore)
+    .extract(messages, makeRegistry("统一使用 pnpm 管理依赖，锁文件为 pnpm-lock.yaml"), "session", activeModel);
+  const superAll = superStore.getAll();
+  assert(superAll.length === 1 && superAll[0].content === "统一使用 pnpm 管理依赖", "超集补充不覆写旧记忆");
 }
 
 console.log("\n" + "=".repeat(40));

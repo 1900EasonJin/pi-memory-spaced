@@ -112,7 +112,9 @@ export class MemoryStore {
           ...m,
           id: typeof m.id === "string" && m.id ? m.id : genId(),
           type: VALID_TYPES.has(m.type) ? m.type : "fact",
-          content: m.content.slice(0, this.config.maxMemoryLength),
+          // 不截断既有内容：截断会在下次保存时写回磁盘，永久丢失长记忆。
+          // 注入/新增时才有长度限制（见 add 与 injector）。
+          content: m.content,
           paths: Array.isArray(m.paths) ? m.paths.filter((p): p is string => typeof p === "string") : [],
           potency: Number.isFinite(m.potency) ? Math.max(0, Math.min(1, m.potency)) : 0.8,
           createdAt,
@@ -219,11 +221,14 @@ export class MemoryStore {
       for (let attempt = 0; attempt < 3; attempt++) {
         this.reload();
         const baseHash = this.diskHash;
+        const before = JSON.stringify(this.data);
         const result = mutator();
         const currentHash = existsSync(this.storePath)
           ? contentHash(readFileSync(this.storePath, "utf-8"))
           : "";
         if (currentHash !== baseHash) continue;
+        // 无实际变化不写盘：避免空库/只读 mutator 时创建或重写文件
+        if (JSON.stringify(this.data) === before) return result;
         this.saveAtomic();
         return result;
       }
@@ -367,9 +372,12 @@ export class MemoryStore {
   // ─── 增删改 ───
 
   add(entry: Omit<MemoryEntry, "id" | "createdAt" | "lastInjectedAt" | "accessCount">): MemoryEntry {
+    const content = entry.content?.trim() ?? "";
+    if (!content) throw new TypeError("Memory content must not be empty");
     const now = Date.now();
     const mem: MemoryEntry = {
       ...entry,
+      content: content.slice(0, this.config.maxMemoryLength),
       id: genId(),
       potency: entry.potency ?? 0.8,
       createdAt: now,
@@ -393,7 +401,15 @@ export class MemoryStore {
   update(id: string, patch: Partial<MemoryEntry>): boolean {
     const m = this.getById(id);
     if (!m) return false;
-    Object.assign(m, patch);
+    // 不可变字段不允许通过 update 覆写，防止破坏 ID 唯一性
+    const { id: _id, createdAt: _createdAt, ...safe } = patch;
+    // 与 add() 一致的输入边界：空白内容拒绝，超长内容截断
+    if (safe.content !== undefined) {
+      const content = safe.content.trim();
+      if (!content) throw new TypeError("Memory content must not be empty");
+      safe.content = content.slice(0, this.config.maxMemoryLength);
+    }
+    Object.assign(m, safe);
     this.markChanged();
     return true;
   }

@@ -47,53 +47,63 @@ export default function (pi: ExtensionAPI) {
 
   // ─── session_start: 从磁盘最新版本执行一次增量衰减 ───
   pi.on("session_start", async (_event: any, ctx: any) => {
-    sessionId = ctx.sessionManager?.getSessionId() ?? "unknown";
-    store.mutate(() => store.applyDecay());
-    injector.invalidateSnapshot();
-    refreshMemoryUi(ctx);
+    try {
+      sessionId = ctx.sessionManager?.getSessionId() ?? "unknown";
+      store.mutate(() => store.applyDecay());
+      injector.invalidateSnapshot();
+      refreshMemoryUi(ctx);
+    } catch (error) {
+      ctx.ui.notify(`⚠️ 记忆初始化异常: ${error}`, "error");
+      // 初始化失败必须向调用方上报，不能吞掉异常假装成功
+      throw error;
+    }
   });
 
   // ─── input: 拦截"记住：xxx"口语指令 ───
   pi.on("input", async (event: any, ctx: any) => {
-    const text = event.text?.trim();
-    if (!text) return;
+    try {
+      const text = event.text?.trim();
+      if (!text) return;
 
-    // 匹配模式：记住：xxx / 记住: xxx / 请记住 xxx / 记一下 xxx
-    const match = text.match(/^(?:记住|记一下|请记住)\s*[：:]\s*(.+)/);
-    const simpleMatch = text.match(/^记住\s+(.+)/);
-    const cmdMatch = text.startsWith("/记住") ? text.replace("/记住", "").trim() : null;
+      // 匹配模式：记住：xxx / 记住: xxx / 请记住 xxx / 记一下 xxx
+      const match = text.match(/^(?:记住|记一下|请记住)\s*[：:]\s*(.+)/);
+      const simpleMatch = text.match(/^记住\s+(.+)/);
+      const cmdMatch = text.startsWith("/记住") ? text.replace("/记住", "").trim() : null;
 
-    const content = match?.[1] ?? simpleMatch?.[1] ?? cmdMatch;
-    if (!content || content.length < 3) return;
+      const content = (match?.[1] ?? simpleMatch?.[1] ?? cmdMatch)?.trim();
+      if (!content || content.length < 3) return;
 
-    const result = store.mutate(() => {
-      const check = store.dedupeCheck(content);
-      if (check.level === "exact") {
-        const top = check.matches[0];
-        store.update(top.entry.id, { potency: Math.min(1, top.entry.potency + 0.1) });
-        return { duplicate: top.entry.content, similarity: top.similarity };
-      }
+      const result = store.mutate(() => {
+        const check = store.dedupeCheck(content);
+        if (check.level === "exact") {
+          const top = check.matches[0];
+          store.update(top.entry.id, { potency: Math.min(1, top.entry.potency + 0.1) });
+          return { duplicate: top.entry.content, similarity: top.similarity };
+        }
 
-      // 只有完全相同才强化；相似但不同可能是用户纠正，必须保留。
-      store.add({
-        type: "preference",
-        content: content.slice(0, store.getConfig().maxMemoryLength),
-        paths: [],
-        potency: 0.9,
-        source: "user",
-        tags: [],
-        sourceSession: sessionId,
+        // 只有完全相同才强化；相似但不同可能是用户纠正，必须保留。
+        store.add({
+          type: "preference",
+          content,
+          paths: [],
+          potency: 0.9,
+          source: "user",
+          tags: [],
+          sourceSession: sessionId,
+        });
+        return { duplicate: undefined, similarity: 0 };
       });
-      return { duplicate: undefined, similarity: 0 };
-    });
 
-    refreshMemoryUi(ctx);
-    if (result.duplicate) {
-      ctx.ui.notify(`⚠️ 已有完全相同记忆，已强化:\n${result.duplicate.slice(0, 80)}`, "info");
-    } else {
-      ctx.ui.notify(`✅ 已记住: ${content.slice(0, 80)}`, "info");
+      refreshMemoryUi(ctx);
+      if (result.duplicate) {
+        ctx.ui.notify(`⚠️ 已有完全相同记忆，已强化:\n${result.duplicate.slice(0, 80)}`, "info");
+      } else {
+        ctx.ui.notify(`✅ 已记住: ${content.slice(0, 80)}`, "info");
+      }
+      return { action: "handled" as const };
+    } catch (error) {
+      ctx.ui.notify(`⚠️ 记忆指令异常: ${error}`, "error");
     }
-    return { action: "handled" as const };
   });
 
   // ─── before_agent_start: 注入记忆到上下文 ───

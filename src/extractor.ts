@@ -141,7 +141,7 @@ export class MemoryExtractor {
           }
 
           // 高相似：不新增条目，合并强化旧记忆。内容保持旧条目原文
-          //（高相似但可能是纠正，不冒险改写内容），只并集 paths/tags 并提升 potency。
+          //（高相似但可能是纠正或否定，不冒险改写内容），只并集 paths/tags 并提升 potency。
           if (check.level === "high") {
             const existingMemory = check.matches[0].entry;
             this.store.update(existingMemory.id, {
