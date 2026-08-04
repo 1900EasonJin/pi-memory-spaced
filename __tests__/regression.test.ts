@@ -1,4 +1,6 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { MemoryStore, normalizeText, simpleHash } from "../src/store.ts";
 import { MemoryInjector } from "../src/injector.ts";
@@ -363,6 +365,34 @@ console.log("\n📋 高相似提取不得覆写旧记忆（补充/否定无法�
     .extract(messages, makeRegistry("统一使用 pnpm 管理依赖，锁文件为 pnpm-lock.yaml"), "session", activeModel);
   const superAll = superStore.getAll();
   assert(superAll.length === 1 && superAll[0].content === "统一使用 pnpm 管理依赖", "超集补充不覆写旧记忆");
+}
+
+console.log("\n📋 蓝图回归项：不存在记录操作与写入失败原文件完整性");
+{
+  // 更新/删除不存在的记录返回 false，不产生副作用
+  const missingStore = createStore("missing-record");
+  assert(missingStore.update("nonexistent-id", { potency: 0.9 }) === false, "更新不存在记录返回 false");
+  assert(missingStore.remove("nonexistent-id") === false, "删除不存在记录返回 false");
+  assert(missingStore.getAll().length === 0, "失败操作不产生副作用");
+
+  // 写入失败（目录只读）时原文件字节不变
+  const roDir = mkdtempSync(join(tmpdir(), "pi-mem-ro-"));
+  const roPath = join(roDir, "store.json");
+  const roStore = new MemoryStore({ storePath: roPath });
+  addFact(roStore, "原始内容");
+  roStore.save();
+  const originalBytes = readFileSync(roPath, "utf8");
+  chmodSync(roDir, 0o555);
+  let saveFailed = false;
+  try {
+    roStore.mutate(() => addFact(roStore, "不该写入"));
+  } catch {
+    saveFailed = true;
+  } finally {
+    chmodSync(roDir, 0o755);
+  }
+  assert(saveFailed, "写入失败时抛出异常而非静默");
+  assert(readFileSync(roPath, "utf8") === originalBytes, "写入失败后原文件字节不变");
 }
 
 console.log("\n" + "=".repeat(40));
