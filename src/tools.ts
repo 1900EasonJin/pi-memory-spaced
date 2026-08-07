@@ -28,6 +28,8 @@ export function registerTools(pi: ExtensionAPI, store: MemoryStore, refreshMemor
           content: [{ type: "text" as const, text: "未找到相关记忆。" }],
         };
       }
+      // 闭环反馈：检索命中 = 复习成功，强化命中记忆并重置衰减锚点（自寻最优统计样本）
+      store.mutate(() => store.registerRecallHits(results.map((m) => m.id)));
 
       const text = results.map((m, i) => {
         const typeLabel =

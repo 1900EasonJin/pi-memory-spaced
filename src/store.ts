@@ -12,7 +12,7 @@ import {
 import { randomUUID, createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
-import type { MemoryEntry, MemoryStoreData, InjectionConfig, DedupeLevel } from "./types.ts";
+import type { MemoryEntry, MemoryStoreData, InjectionConfig, DedupeLevel, AdaptationStats } from "./types.ts";
 import { DEFAULT_INJECTION_CONFIG } from "./types.ts";
 
 function genId(): string {
@@ -56,6 +56,15 @@ function bigrams(s: string): Set<string> {
 /** 入库闸门阈值（overlap 系数实测：重复对 0.52~0.66，相关但不同 0.35~0.38，无关 <0.1） */
 export const GATE_HIGH_THRESHOLD = 0.8;
 export const GATE_MID_THRESHOLD = 0.45;
+
+// ─── 自寻最优（钱学森《工程控制论》第十五章）：用真实命中率调衰减系数，不写死常数 ───
+const ADAPT_WINDOW_MS = 7 * 86_400_000; // 统计窗口：7 天
+const ADAPT_MIN_SAMPLES = 30; // 窗口内最少注入样本数，样本不足不调节（无测量不控制）
+const ADAPT_HIT_HIGH = 0.3; // 命中率 ≥ 0.3 → 记忆有用，放宽衰减
+const ADAPT_HIT_LOW = 0.05; // 命中率 < 0.05 → 注入几乎没用上，收紧衰减
+const ADAPT_STEP = 0.01;
+const ADAPT_MAX = 0.97;
+const ADAPT_MIN = 0.9;
 /**
  * Memory Store — 纯文件系统持久化，间隔重复驱动
  *
@@ -69,9 +78,12 @@ export class MemoryStore {
   private lockPath: string;
   private diskHash = "";
   private revision = 0;
+  /** 实际生效的衰减系数（自寻最优会调整它，初始 = config.decayFactor） */
+  private activeDecayFactor: number;
 
   constructor(opts?: { storePath?: string; config?: Partial<InjectionConfig> }) {
     this.config = { ...DEFAULT_INJECTION_CONFIG, ...opts?.config };
+    this.activeDecayFactor = this.config.decayFactor;
     this.storePath = opts?.storePath ?? join(homedir(), ".pi", "agent", "memory-store.json");
     this.dirPath = dirname(this.storePath);
     this.lockPath = `${this.storePath}.lock`;
@@ -91,6 +103,7 @@ export class MemoryStore {
       resolvedSources: [],
       dailyAddedDate: "",
       dailyAddedCount: 0,
+      adaptation: { windowStart: Date.now(), injections: 0, recallHits: 0, lastAdaptedAt: 0 },
     };
   }
 
@@ -148,6 +161,14 @@ export class MemoryStore {
           : [],
         dailyAddedDate: typeof source.dailyAddedDate === "string" ? source.dailyAddedDate : "",
         dailyAddedCount: Number.isFinite(source.dailyAddedCount) ? Math.max(0, Math.floor(source.dailyAddedCount)) : 0,
+        adaptation: source.adaptation && Number.isFinite(source.adaptation.windowStart)
+          ? {
+              windowStart: source.adaptation.windowStart,
+              injections: Math.max(0, Math.floor(source.adaptation.injections ?? 0)),
+              recallHits: Math.max(0, Math.floor(source.adaptation.recallHits ?? 0)),
+              lastAdaptedAt: Number.isFinite(source.adaptation.lastAdaptedAt) ? source.adaptation.lastAdaptedAt : 0,
+            }
+          : { windowStart: now, injections: 0, recallHits: 0, lastAdaptedAt: 0 },
       },
       hash: contentHash(raw),
     };
@@ -216,6 +237,11 @@ export class MemoryStore {
 
   getConfig(): Readonly<InjectionConfig> {
     return this.config;
+  }
+
+  /** 当前生效的衰减系数（自寻最优调整后的值） */
+  getActiveDecayFactor(): number {
+    return this.activeDecayFactor;
   }
 
   getStorePath(): string {
@@ -351,7 +377,7 @@ export class MemoryStore {
       const anchor = m.lastDecayedAt ?? m.lastInjectedAt ?? m.createdAt;
       const daysSince = Math.max(0, (now - anchor) / 86_400_000);
       if (daysSince > 0) {
-        m.potency = Math.max(0, Math.min(1, m.potency * Math.pow(this.config.decayFactor, daysSince)));
+        m.potency = Math.max(0, Math.min(1, m.potency * Math.pow(this.activeDecayFactor, daysSince)));
         changed = true;
       }
       if (m.lastDecayedAt !== now) {
@@ -366,18 +392,72 @@ export class MemoryStore {
    * 标记一条记忆被注入：只累计使用次数，不改 potency、不重置衰减锚点。
    * 注入/读取不是新证据——强化只能来自提取器发现的新独立证据（evidenceCount）。
    * 这样被频繁使用的记忆仍会随时间衰减，只是 accessCount 高（可能固化为永久记忆）。
+   * 同时累计自寻最优窗口的注入样本数。
    */
   registerInjection(id: string): void {
     const m = this.getById(id);
     if (!m) return;
     m.accessCount++;
     if (!m.tenured && m.accessCount >= this.config.tenureThreshold) m.tenured = true;
+    if (this.data.adaptation) this.data.adaptation.injections++;
     this.markChanged();
   }
 
   /** 批量标记注入 */
   registerInjections(ids: string[]): void {
     for (const id of ids) this.registerInjection(id);
+  }
+
+  /**
+   * 闭环反馈（《工程控制论》第四章）：memory_recall 检索命中 = 复习成功。
+   * 命中即强化 potency 并重置衰减锚点——被动注入不强化，主动检索成功才强化。
+   * 固化记忆不再强化，但命中仍计入自寻最优统计（它被使用了）。
+   */
+  registerRecallHits(ids: string[], now = Date.now()): void {
+    if (ids.length === 0) return;
+    for (const id of ids) {
+      const m = this.getById(id);
+      if (!m) continue;
+      if (!m.tenured) {
+        m.potency = Math.min(1, m.potency + this.config.recallBoost);
+        m.lastDecayedAt = now;
+        m.recallHitCount = (m.recallHitCount ?? 0) + 1;
+      }
+      if (this.data.adaptation) this.data.adaptation.recallHits++;
+    }
+    this.markChanged();
+  }
+
+  /**
+   * 自寻最优（《工程控制论》第十五章）：窗口期满且有足够样本时，
+   * 按真实命中率（检索命中/注入）调整衰减系数：
+   * - 命中率高（≥0.3）→ 记忆确实被用上，放宽衰减（留得更久）
+   * - 命中率低（<0.05）→ 注入几乎没用，收紧衰减（更快遗忘，减少上下文污染）
+   * 返回调整后的衰减系数；未调整或样本不足返回 undefined。
+   */
+  adapt(now = Date.now()): number | undefined {
+    const s = this.data.adaptation;
+    if (!s) return undefined;
+    const resetWindow = (at: number): void => {
+      this.data.adaptation = { windowStart: at, injections: 0, recallHits: 0, lastAdaptedAt: at };
+    };
+    // 窗口期未满：继续累计样本
+    if (now - s.windowStart < ADAPT_WINDOW_MS) return undefined;
+    // 样本不足：无测量不控制，滚动到下一个窗口
+    if (s.injections < ADAPT_MIN_SAMPLES) {
+      resetWindow(now);
+      this.markChanged();
+      return undefined;
+    }
+    const hitRate = s.recallHits / s.injections;
+    if (hitRate >= ADAPT_HIT_HIGH) {
+      this.activeDecayFactor = Math.min(ADAPT_MAX, this.activeDecayFactor + ADAPT_STEP);
+    } else if (hitRate < ADAPT_HIT_LOW) {
+      this.activeDecayFactor = Math.max(ADAPT_MIN, this.activeDecayFactor - ADAPT_STEP);
+    }
+    resetWindow(now);
+    this.markChanged();
+    return this.activeDecayFactor;
   }
 
   // ─── 增删改 ───
@@ -527,4 +607,13 @@ export class MemoryStore {
 
 export function createStore(): MemoryStore {
   return new MemoryStore();
+}
+
+/**
+ * 整合触发判定（纯函数，独立可测）：
+ * 本轮有新增且活跃记忆偏多，或距上次整合超过 24 小时。
+ * 注意：added 可能为 0（短会话未提取）——不得引用未定义变量（曾导致 ReferenceError）。
+ */
+export function shouldConsolidate(added: number, activeCount: number, lastRunAt: number, now = Date.now()): boolean {
+  return (added > 0 && activeCount > 15) || now - lastRunAt > 24 * 3600_000;
 }

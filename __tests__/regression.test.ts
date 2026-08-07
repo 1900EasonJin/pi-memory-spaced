@@ -474,6 +474,20 @@ console.log("\n📋 端到端：领导偏好保留，一次性项目细节拒收
   assert((repeatStore.getAll()[0]?.evidenceCount ?? 0) === 2, "evidenceCount 累计为 2");
 }
 
+console.log("\n📋 回归：整合触发判定不引用未定义变量（ReferenceError 修复）");
+{
+  const { shouldConsolidate } = await import("../src/store.ts");
+  const now = Date.now();
+  // 短会话未提取（added=0）：不得抛错，也不得因 result 未定义触发整合
+  assert(shouldConsolidate(0, 5, now, now) === false, "added=0 且活跃少 → 不触发整合");
+  // 无新增但距上次整合超 24h → 触发
+  assert(shouldConsolidate(0, 5, now - 25 * 3600_000, now) === true, "距上次整合超 24h → 触发");
+  // 有新增且活跃>15 → 触发
+  assert(shouldConsolidate(2, 16, now, now) === true, "新增>0 且活跃>15 → 触发");
+  // 有新增但活跃不多，且未超时 → 不触发
+  assert(shouldConsolidate(2, 5, now, now) === false, "新增>0 但活跃≤15 且未超时 → 不触发");
+}
+
 console.log("\n" + "=".repeat(40));
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);
 if (failed > 0) process.exit(1);

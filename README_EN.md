@@ -28,11 +28,24 @@ Every memory carries a **potency score (0~1)** that decays exponentially over ti
 ```
 potency curve:
   new memory → 0.8 ──→ ×0.95 per day ──→ archived below 0.2
-             ↑
+             ↑              ↑
              └── +0.01 per new independent evidence (evidenceCount+1)
+             └── +0.03 per recall hit (recallHitCount+1, decay anchor reset)
 ```
 
-**Reinforcement only comes from new evidence — injection/reading never boosts potency**: being injected only increments `accessCount` (which may promote the memory to tenured), without touching potency or the decay anchor, so heavily used memories still decay over time.
+**Reinforcement only comes from new evidence and recall hits — injection/reading never boosts potency**: being injected only increments `accessCount` (which may promote the memory to tenured), without touching potency or the decay anchor, so heavily used memories still decay over time.
+
+### Closed-Loop Feedback (Engineering Cybernetics)
+The system is **closed-loop**, not open-loop: a `memory_recall` hit means successful retrieval (review success) — the hit strengthens potency and resets the decay anchor. Passive injection never strengthens; only active retrieval success does.
+
+### Self-Optimizing (Engineering Cybernetics)
+The decay factor is not a hard-coded constant: the system tracks the real hit rate (recall hits / injections) over a 7-day window and adjusts itself when the window matures with ≥30 samples:
+
+- Hit rate ≥ 0.3 → memory is actually useful, loosen decay (+0.01, capped at 0.97, keep longer)
+- Hit rate < 0.05 → injections barely used, tighten decay (−0.01, floored at 0.90, forget faster, less pollution)
+- Not enough samples → no adjustment (no measurement, no control)
+
+`/mem:status` shows the currently active decay factor.
 
 ### Automatic Extraction
 Triggered once per session once user messages reach ≥3 turns (`agent_settled`); the current session model analyzes the **entire session** of user/assistant messages. Tool output is never sent to the extraction model.

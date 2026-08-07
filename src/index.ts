@@ -13,7 +13,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { MemoryStore } from "./store.ts";
+import { MemoryStore, shouldConsolidate } from "./store.ts";
 import { MemoryInjector } from "./injector.ts";
 import { MemoryExtractor } from "./extractor.ts";
 import { MemoryConsolidator } from "./consolidator.ts";
@@ -52,7 +52,11 @@ export default function (pi: ExtensionAPI) {
     try {
       sessionId = ctx.sessionManager?.getSessionId() ?? "unknown";
       extractedThisSession = false;
-      store.mutate(() => store.applyDecay());
+      store.mutate(() => {
+        store.applyDecay();
+        // 自寻最优：窗口期满时按真实命中率调整衰减系数
+        store.adapt();
+      });
       injector.invalidateSnapshot();
       refreshMemoryUi(ctx);
     } catch (error) {
@@ -134,6 +138,8 @@ export default function (pi: ExtensionAPI) {
   // ─── agent_settled: 每个 session 提取一次（用户消息 ≥3 轮后才触发，避免短会话空跑 LLM）───
   pi.on("agent_settled", async (_event: any, ctx: any) => {
     try {
+      // result 必须提到块外：下方整合触发判定也要引用（修复 ReferenceError）
+      let result: { added: number } | undefined;
       if (!extractedThisSession) {
         const entries = ctx.sessionManager?.getBranch?.() ?? [];
         const userMsgCount = entries.filter(
@@ -145,7 +151,7 @@ export default function (pi: ExtensionAPI) {
             .filter((entry: any) => entry.type === "message")
             .map((entry: any) => entry.message)
             .filter(Boolean);
-          const result = await extractor.extract(messages, ctx.modelRegistry, sessionId, ctx.model);
+          result = await extractor.extract(messages, ctx.modelRegistry, sessionId, ctx.model);
           store.reloadIfChanged();
           refreshMemoryUi(ctx);
           if (result.added > 0) ctx.ui.notify(`🧠 自动记忆: 新增 ${result.added} 条`, "info");
@@ -153,9 +159,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       // 整合触发：本轮有新增且记忆偏多，或距上次整合超过 24 小时
-      const dueForConsolidation =
-        (result.added > 0 && store.getActive().length > 15) ||
-        Date.now() - lastConsolidatedAt > 24 * 3600_000;
+      const dueForConsolidation = shouldConsolidate(result?.added ?? 0, store.getActive().length, lastConsolidatedAt);
       if (dueForConsolidation) {
         const consolidation = await consolidator.consolidate(ctx.modelRegistry, sessionId, ctx.model);
         lastConsolidatedAt = Date.now();

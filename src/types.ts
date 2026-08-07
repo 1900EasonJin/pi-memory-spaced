@@ -36,6 +36,8 @@ export interface MemoryEntry {
   tenured?: boolean;
   /** 独立证据出现次数（重复表达强化计数，旧数据缺省视为 1） */
   evidenceCount?: number;
+  /** 被 memory_recall 检索命中的次数（闭环反馈信号：复习成功计数） */
+  recallHitCount?: number;
 }
 
 /** 持久化存储格式 */
@@ -50,6 +52,20 @@ export interface MemoryStoreData {
   /** 每日新增计数（配额控制，自动路径用） */
   dailyAddedDate?: string;
   dailyAddedCount?: number;
+  /** 自寻最优统计（旧数据缺省时初始化） */
+  adaptation?: AdaptationStats;
+}
+
+/** 自寻最优统计窗口（闭环反馈的测量数据） */
+export interface AdaptationStats {
+  /** 当前统计窗口起点 */
+  windowStart: number;
+  /** 窗口内注入次数 */
+  injections: number;
+  /** 窗口内检索命中次数 */
+  recallHits: number;
+  /** 上次自适应评估时间 */
+  lastAdaptedAt: number;
 }
 
 /** 注入配置 */
@@ -68,6 +84,8 @@ export interface InjectionConfig {
   lowEfficiencyThreshold: number;
   /** 固化阈值（accessCount ≥ 此值后自动晋升为永久记忆） */
   tenureThreshold: number;
+  /** 闭环反馈：memory_recall 命中一次的记忆强化增量（复习成功） */
+  recallBoost: number;
 }
 
 export const DEFAULT_INJECTION_CONFIG: InjectionConfig = {
@@ -78,6 +96,7 @@ export const DEFAULT_INJECTION_CONFIG: InjectionConfig = {
   archiveThreshold: 0.2,
   lowEfficiencyThreshold: 0.3,
   tenureThreshold: 50,
+  recallBoost: 0.03,
 };
 
 /** 入库闸门判定级别 */

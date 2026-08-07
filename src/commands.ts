@@ -208,6 +208,7 @@ export function registerCommands(
         lines.push("🧠 记忆系统状态");
         lines.push(`总条目: ${all.length} | 活跃: ${active.length} | 低效: ${lowEff.length} | 已归档: ${store.getArchived().length} | 🔒 固化: ${tenured.length}`);
         lines.push(`当前注入快照: ${snapshot ? `${snapshot.injectedIds.length} 条, ${snapshot.tokensUsed} tokens` : "无"}`);
+        lines.push(`衰减系数: ${store.getActiveDecayFactor().toFixed(3)}（自寻最优）`);
         lines.push("");
         lines.push("Top-5 高优先级:");
         for (const m of top5) {
