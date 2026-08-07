@@ -83,7 +83,15 @@ export class MemoryStore {
   // ─── 持久化 ───
 
   private emptyData(): MemoryStoreData {
-    return { version: 1, updatedAt: Date.now(), memories: [], prunedCount: 0, resolvedSources: [] };
+    return {
+      version: 1,
+      updatedAt: Date.now(),
+      memories: [],
+      prunedCount: 0,
+      resolvedSources: [],
+      dailyAddedDate: "",
+      dailyAddedCount: 0,
+    };
   }
 
   private load(): { data: MemoryStoreData; hash: string } {
@@ -124,6 +132,7 @@ export class MemoryStore {
           source: VALID_SOURCES.has(m.source) ? m.source : "auto",
           tags: Array.isArray(m.tags) ? m.tags.filter((t): t is string => typeof t === "string") : [],
           tenured: m.tenured === true || undefined,
+          evidenceCount: Number.isFinite(m.evidenceCount) ? Math.max(1, Math.floor(m.evidenceCount)) : undefined,
         } as MemoryEntry;
       });
 
@@ -137,6 +146,8 @@ export class MemoryStore {
         resolvedSources: Array.isArray(source.resolvedSources)
           ? source.resolvedSources.filter((hash): hash is string => typeof hash === "string")
           : [],
+        dailyAddedDate: typeof source.dailyAddedDate === "string" ? source.dailyAddedDate : "",
+        dailyAddedCount: Number.isFinite(source.dailyAddedCount) ? Math.max(0, Math.floor(source.dailyAddedCount)) : 0,
       },
       hash: contentHash(raw),
     };
@@ -351,14 +362,14 @@ export class MemoryStore {
     if (changed) this.markChanged();
   }
 
-  /** 标记一条记忆被注入（提升 potency，达到阈值后自动固化） */
+  /**
+   * 标记一条记忆被注入：只累计使用次数，不改 potency、不重置衰减锚点。
+   * 注入/读取不是新证据——强化只能来自提取器发现的新独立证据（evidenceCount）。
+   * 这样被频繁使用的记忆仍会随时间衰减，只是 accessCount 高（可能固化为永久记忆）。
+   */
   registerInjection(id: string): void {
     const m = this.getById(id);
     if (!m) return;
-    const now = Date.now();
-    m.potency = Math.min(1.0, m.potency + this.config.potencyBoost);
-    m.lastInjectedAt = now;
-    m.lastDecayedAt = now;
     m.accessCount++;
     if (!m.tenured && m.accessCount >= this.config.tenureThreshold) m.tenured = true;
     this.markChanged();
@@ -386,8 +397,21 @@ export class MemoryStore {
       accessCount: 0,
     };
     this.data.memories.push(mem);
+    // 每日新增计数（配额控制）
+    const today = new Date().toISOString().slice(0, 10);
+    if (this.data.dailyAddedDate !== today) {
+      this.data.dailyAddedDate = today;
+      this.data.dailyAddedCount = 0;
+    }
+    this.data.dailyAddedCount = (this.data.dailyAddedCount ?? 0) + 1;
     this.markChanged();
     return mem;
+  }
+
+  /** 今日自动新增是否已达配额（跨天自动重置） */
+  isDailyBudgetExhausted(limit: number): boolean {
+    const today = new Date().toISOString().slice(0, 10);
+    return this.data.dailyAddedDate === today && (this.data.dailyAddedCount ?? 0) >= limit;
   }
 
   remove(id: string): boolean {
@@ -477,6 +501,7 @@ export class MemoryStore {
         memory.lastDecayedAt ?? memory.lastInjectedAt,
       );
       keeper.accessCount += memory.accessCount;
+      keeper.evidenceCount = Math.max(keeper.evidenceCount ?? 1, memory.evidenceCount ?? 1);
       keeper.tenured = keeper.tenured || memory.tenured || keeper.accessCount >= this.config.tenureThreshold || undefined;
       keeper.source = preferredSource.source;
       keeper.type = preferredSource.type;

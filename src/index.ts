@@ -31,6 +31,8 @@ export default function (pi: ExtensionAPI) {
   const extractor = new MemoryExtractor(store);
   const consolidator = new MemoryConsolidator(store);
   let sessionId = "";
+  // 同一 session 只自动提取一次（对齐 samfoy/pi-memory：session 结束才整合，避免每轮都喂 LLM）
+  let extractedThisSession = false;
   // 上次整合时间（会话内存即可：重启后补跑一次成本低，无簇时不产生 LLM 调用）
   let lastConsolidatedAt = 0;
 
@@ -49,6 +51,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event: any, ctx: any) => {
     try {
       sessionId = ctx.sessionManager?.getSessionId() ?? "unknown";
+      extractedThisSession = false;
       store.mutate(() => store.applyDecay());
       injector.invalidateSnapshot();
       refreshMemoryUi(ctx);
@@ -128,18 +131,26 @@ export default function (pi: ExtensionAPI) {
   // ─── session_before_compact: 刷新快照 ───
   pi.on("session_before_compact", async () => { injector.invalidateSnapshot(); });
 
-  // ─── agent_settled: 只分析当前最后一轮，提取器内部原子保存 ───
+  // ─── agent_settled: 每个 session 提取一次（用户消息 ≥3 轮后才触发，避免短会话空跑 LLM）───
   pi.on("agent_settled", async (_event: any, ctx: any) => {
     try {
-      const entries = ctx.sessionManager?.getBranch?.() ?? [];
-      const messages = entries
-        .filter((entry: any) => entry.type === "message")
-        .map((entry: any) => entry.message)
-        .filter(Boolean);
-      const result = await extractor.extract(messages, ctx.modelRegistry, sessionId, ctx.model);
-      store.reloadIfChanged();
-      refreshMemoryUi(ctx);
-      if (result.added > 0) ctx.ui.notify(`🧠 自动记忆: 新增 ${result.added} 条`, "info");
+      if (!extractedThisSession) {
+        const entries = ctx.sessionManager?.getBranch?.() ?? [];
+        const userMsgCount = entries.filter(
+          (entry: any) => entry.type === "message" && entry.message?.role === "user",
+        ).length;
+        if (userMsgCount >= 3) {
+          extractedThisSession = true;
+          const messages = entries
+            .filter((entry: any) => entry.type === "message")
+            .map((entry: any) => entry.message)
+            .filter(Boolean);
+          const result = await extractor.extract(messages, ctx.modelRegistry, sessionId, ctx.model);
+          store.reloadIfChanged();
+          refreshMemoryUi(ctx);
+          if (result.added > 0) ctx.ui.notify(`🧠 自动记忆: 新增 ${result.added} 条`, "info");
+        }
+      }
 
       // 整合触发：本轮有新增且记忆偏多，或距上次整合超过 24 小时
       const dueForConsolidation =

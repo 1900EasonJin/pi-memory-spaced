@@ -74,23 +74,25 @@ function testDecay() {
   assert(afterLong.potency < store.getById(m.id)!.potency, "10 天未使用比 2 天未使用衰减更多");
 }
 
-// ─── 3. 间隔重复 — 注入提升 ───
+// ─── 3. 间隔重复 — 注入只计数不强化（强化仅来自新独立证据）───
 function testInjectionBoost() {
-  console.log("\n📋 测试: 注入 potency 提升");
+  console.log("\n📋 测试: 注入只累计使用，不强化 potency、不重置衰减锚点");
 
   const store = createTestStore();
   const m = store.add({ type: "decision", content: "test", paths: [], potency: 0.5, source: "manual", tags: [] });
+  const decayAnchor = store.getById(m.id)!.lastDecayedAt;
 
   store.registerInjection(m.id);
   const after = store.getById(m.id)!;
-  assert(after.potency > 0.5, "注入后 potency 提升");
+  assert(after.potency === 0.5, "注入后 potency 不变（注入不是新证据）");
   assert(after.accessCount === 1, "注入计数增加");
-  assert(after.lastInjectedAt > 0, "注入时间更新");
+  assert(after.lastDecayedAt === decayAnchor, "注入不重置衰减锚点，记忆仍会随时间衰减");
 
-  // 多次注入不超 1.0
+  // 反复注入也不会涨 potency
   for (let i = 0; i < 5; i++) store.registerInjection(m.id);
   const afterMany = store.getById(m.id)!;
-  assert(afterMany.potency <= 1.0, "多次注入不超 1.0");
+  assert(afterMany.potency === 0.5, "多次注入 potency 仍不变");
+  assert(afterMany.accessCount === 6, "注入计数累计到 6");
 }
 
 // ─── 4. 路径关联查询 ───
@@ -197,12 +199,12 @@ function testArchive() {
 
   const store = createTestStore();
   store.add({ type: "fact", content: "活跃记忆", paths: [], potency: 0.8, source: "manual", tags: [] });
-  store.add({ type: "fact", content: "低效记忆", paths: [], potency: 0.12, source: "manual", tags: [] });
-  store.add({ type: "fact", content: "归档记忆", paths: [], potency: 0.06, source: "manual", tags: [] });
+  store.add({ type: "fact", content: "低效记忆", paths: [], potency: 0.25, source: "manual", tags: [] });
+  store.add({ type: "fact", content: "归档记忆", paths: [], potency: 0.15, source: "manual", tags: [] });
 
   assert(store.getActive().length === 1, "活跃: 只有 0.8 的");
-  assert(store.getLowEfficiency().length === 1, "低效: 0.10~0.15 的 1 条");
-  assert(store.getArchived().length === 1, "归档: 低于 0.10 的 1 条");
+  assert(store.getLowEfficiency().length === 1, "低效: 0.20~0.30 的 1 条");
+  assert(store.getArchived().length === 1, "归档: 低于 0.20 的 1 条");
   assert(store.getInjectable().length === 2, "可注入: 活跃和低效共 2 条");
 
   store.applyDecay();
@@ -302,6 +304,67 @@ function testDedupeAll() {
   assert(r5.merged === 0, "相关但不同的记忆不合并（<0.55）");
 }
 
+// ─── 14. 表驱动：相似偏好重复表达只保留一条（强化不新增）───
+function testReinforcementTable() {
+  console.log("\n📋 测试: 相似偏好重复表达只保留一条");
+
+  // 三个相似度级别：exact / high(≥0.8) / mid(≥0.45) → 都应强化旧条目而非新增
+  const cases = [
+    { name: "exact 归一化相同", a: "改代码前先跑测试", b: "改代码前先跑测试" },
+    { name: "high 高度相似", a: "用户偏好改代码前先运行测试", b: "用户偏好改代码前先运行测试，再检查覆盖率" },
+    { name: "mid 相关但不同表述", a: "修改课件前先与老师确认大纲", b: "制作课件前先确认大纲和配色再动手" },
+  ];
+
+  for (const c of cases) {
+    const store = createTestStore();
+    const first = store.add({ type: "preference", content: c.a, paths: [], potency: 0.8, source: "auto", tags: [] });
+    const check = store.dedupeCheck(c.b);
+    assert(check.level !== "none", `${c.name}：相似度检测命中（${check.level}）`);
+    if (check.level !== "none") {
+      const existing = check.matches[0].entry;
+      store.update(existing.id, {
+        potency: Math.min(1, existing.potency + 0.01),
+        evidenceCount: (existing.evidenceCount ?? 1) + 1,
+      });
+    }
+    assert(store.getAll().length === 1, `${c.name}：重复表达后仍只有 1 条`);
+    assert((store.getById(first.id)?.evidenceCount ?? 1) === 2, `${c.name}：evidenceCount 累计为 2`);
+    assert(store.getById(first.id)?.potency === 0.81, `${c.name}：potency 仅微量强化 0.01`);
+  }
+
+  // 未匹配（<0.45）→ 正常新增
+  const store = createTestStore();
+  store.add({ type: "preference", content: "用户偏好使用中文沟通", paths: [], potency: 0.8, source: "auto", tags: [] });
+  const noMatch = store.dedupeCheck("PPT 汇报用深色背景配金色标题");
+  assert(noMatch.level === "none", "不相关内容不命中，允许新增");
+}
+
+// ─── 15. 归档边界：阈值恰好相等时行为固定（< 0.2 归档，≥ 0.2 可注入）───
+function testArchiveBoundary() {
+  console.log("\n📋 测试: 归档边界（0.2 精确值）");
+
+  const store = createTestStore();
+  store.add({ type: "fact", content: "边界 0.20", paths: [], potency: 0.2, source: "manual", tags: [] });
+  store.add({ type: "fact", content: "边界 0.19", paths: [], potency: 0.19, source: "manual", tags: [] });
+  const archiveThreshold = store.getConfig().archiveThreshold;
+  assert(archiveThreshold === 0.2, "归档阈值配置为 0.20");
+  assert(store.getArchived().length === 1, "0.19 归档、0.20 不归档");
+  assert(store.getArchived()[0].content === "边界 0.19", "恰好 0.19 属于归档");
+  assert(store.getInjectable().length === 1, "恰好 0.20 仍可注入（>= 归档线）");
+  assert(store.getInjectable()[0].content === "边界 0.20", "可注入集合含 0.20 边界");
+
+  // 衰减后跌破归档线 → 自动转为不可注入
+  const store2 = createTestStore();
+  const m = store2.add({ type: "fact", content: "将归档的记忆", paths: [], potency: 0.8, source: "manual", tags: [] });
+  const base = Date.now();
+  store2.update(m.id, { lastDecayedAt: base - 40 * 86_400_000 });
+  store2.applyDecay(base);
+  const p = store2.getById(m.id)!.potency;
+  assert(p < 0.2, `衰减 40 天后 potency=${p.toFixed(3)} 跌破 0.2`);
+  assert(store2.getArchived().some((x) => x.id === m.id), "跌破归档线后进入归档集合");
+  assert(!store2.getInjectable().some((x) => x.id === m.id), "归档记忆不可注入");
+}
+
 // ─── 运行全部测试 ───
 console.log("🧪 pi-memory-spaced 核心测试");
 console.log("=".repeat(40));
@@ -319,6 +382,8 @@ testTopN();
 testMemoryMd();
 testPersistence();
 testArchive();
+testReinforcementTable();
+testArchiveBoundary();
 
 console.log("\n" + "=".repeat(40));
 console.log(`\n结果: ${passed} 通过, ${failed} 失败`);

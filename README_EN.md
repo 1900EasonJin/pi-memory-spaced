@@ -23,22 +23,30 @@ pi -e ./src/index.ts
 ## How It Works
 
 ### Spaced Repetition
-Every memory carries a **potency score (0~1)** that decays exponentially over time and is boosted whenever the memory is injected into context. Low-scoring memories are archived automatically.
+Every memory carries a **potency score (0~1)** that decays exponentially over time. Low-scoring memories are archived automatically (no longer injected).
 
 ```
 potency curve:
-  new memory → 0.8 ──→ ×0.95 per day ──→ archived below 0.1
-             ↑                          │
-             └── +0.3 when used ────────┘
+  new memory → 0.8 ──→ ×0.95 per day ──→ archived below 0.2
+             ↑
+             └── +0.01 per new independent evidence (evidenceCount+1)
 ```
 
+**Reinforcement only comes from new evidence — injection/reading never boosts potency**: being injected only increments `accessCount` (which may promote the memory to tenured), without touching potency or the decay anchor, so heavily used memories still decay over time.
+
 ### Automatic Extraction
-After every conversation turn (`agent_settled`), the current session model analyzes only the last turn of user/assistant messages and extracts decisions, conventions, patterns, preferences, facts, and lessons worth remembering long-term. Tool output is never sent to the extraction model.
+Triggered once per session once user messages reach ≥3 turns (`agent_settled`); the current session model analyzes the **entire session** of user/assistant messages. Tool output is never sent to the extraction model.
+
+**Hard gate (not relying on model honesty)**: every candidate must explicitly declare `kind` and `durable` —
+- `kind`: `preference` / `workflow` / `constraint` / `lesson` / `decision` / `project_fact`
+- `durable !== true` or `kind === "project_fact"` → discarded at parse time
+
+Rejected: current branch/commit state, file paths, build artifacts, one-off errors and fixes, transient progress, facts re-readable from the repo, time-decaying snapshots. A single occurrence never implies a preference unless the user says so explicitly (e.g. "always do it this way from now on").
 
 ### Safe Deduplication
 New memories are checked with character-overlap similarity, handled conservatively:
-- Identical after normalization → merged, preserving tenure state, source, timestamps, paths/tags
-- Highly similar auto-extracted content (≥0.8) → not added; merged into the existing entry instead (paths/tags union + potency boost), original text untouched
+- **Match (similarity ≥ 0.45, incl. exact/high/mid) → reinforce, never insert**: `evidenceCount+1`, potency +0.01, paths/tags union; original text untouched (high similarity may be a correction or negation — never overwrite blindly)
+- **No match (< 0.45) → allowed to insert** (subject to quotas)
 - Similar content added manually by the user → kept as-is, since it may be a correction, negation, or new convention
 
 ### Automatic Consolidation
@@ -52,9 +60,9 @@ Memories in the "related but different" similarity band (0.3~0.8) are consolidat
 Legacy `resolvedSources` hashes written by PiDeck remain honored — previously handled content never re-enters the store automatically.
 
 **Threshold convention**: the extension shares the same potency tiers as the PiDeck MemSpacedCard:
-- `≥0.15` → active
-- `0.10~0.15` → low-efficiency
-- `<0.10` → archived (kept in the store, but never auto-injected)
+- `≥0.30` → active
+- `0.20~0.30` → low-efficiency
+- `<0.20` → archived (kept in the store, but never auto-injected)
 
 ### Memory Palace (Path Association)
 Memories can be associated with file paths. When the Agent works on a file, memories linked to that path are injected first.

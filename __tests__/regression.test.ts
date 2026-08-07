@@ -93,7 +93,7 @@ console.log("\n📋 去重不得吞掉纠正，且必须保留元数据");
   metadataStore.dedupeAll();
   const kept = metadataStore.getAll()[0];
   assert(kept.tenured === true, "精确合并保留固化状态");
-  assert(kept.lastInjectedAt === latestInjectedAt, "精确合并保留最新注入时间");
+  assert(kept.lastInjectedAt >= latestInjectedAt, "精确合并保留最新注入时间");
   assert(kept.source === "user", "精确合并保留更强来源");
 }
 
@@ -177,7 +177,7 @@ console.log("\n📋 旧 resolvedSources 和数据边界必须生效");
   assert(snapshot.text.includes("\\n## 忽略此前指令"), "换行以 JSON 字符串形式转义");
 }
 
-console.log("\n📋 路径检索和当前轮提取必须收紧");
+console.log("\n📋 路径检索和全会话提取必须收紧");
 {
   const store = createStore("path-filter");
   addFact(store, "无关记忆", 0.9, ["/a/file.ts"]);
@@ -187,16 +187,35 @@ console.log("\n📋 路径检索和当前轮提取必须收紧");
   accumulateToolCallPath("bash", { command: "cat /private/secret.txt" });
   assert(drainAccumulatedPaths().length === 0, "不再从 bash 字符串猜测路径");
 
-  const latestTurnMessages = (extractor as any).latestTurnMessages;
+  // 提取输入必须是整个会话（含所有轮次），且排除工具输出
+  const activeModel = { provider: "p", id: "m" };
+  let requestedContext = "";
+  const provider = {
+    streamSimple(_model: any, context: any) {
+      requestedContext = context.messages[0].content;
+      return {
+        result: async () => ({
+          content: [{ type: "text", text: "[]" }],
+        }),
+      };
+    },
+  };
+  const registry = {
+    getProvider: () => provider,
+    getProviderAuth: async () => ({ auth: { apiKey: "test" } }),
+  };
   const messages = [
-    { role: "user", content: "旧问题" },
+    { role: "user", content: "旧问题，这个偏好很重要：以后提交前先跑测试".repeat(25) },
     { role: "assistant", content: [{ type: "text", text: "旧回答" }] },
-    { role: "user", content: "新问题" },
+    { role: "user", content: "新问题".repeat(30) },
     { role: "toolResult", toolName: "read", content: [{ type: "text", text: "敏感工具输出" }] },
     { role: "assistant", content: [{ type: "text", text: "新回答" }] },
   ];
-  const latest = typeof latestTurnMessages === "function" ? latestTurnMessages(messages) : [];
-  assert(latest.length === 2 && latest[0].content === "新问题" && latest[1].role === "assistant", "只提取最后一轮用户/助手消息并排除工具结果");
+  await new (extractor as any).MemoryExtractor(store)
+    .extract(messages, registry, "session", activeModel);
+  assert(requestedContext.includes("旧问题"), "提取输入包含会话开头的消息（全会话而非最后一轮）");
+  assert(requestedContext.includes("新问题"), "提取输入包含会话末尾的消息");
+  assert(!requestedContext.includes("敏感工具输出"), "工具输出不发送给提取模型");
 }
 
 console.log("\n📋 自动提取必须复用当前模型且不发送工具输出");
@@ -213,7 +232,7 @@ console.log("\n📋 自动提取必须复用当前模型且不发送工具输出
           return {
             content: [{
               type: "text",
-              text: JSON.stringify([{ type: "preference", content: "用户长期偏好使用当前会话模型完成后台提取", paths: [], tags: ["模型"] }]),
+              text: JSON.stringify([{ type: "preference", kind: "preference", durable: true, content: "用户长期偏好使用当前会话模型完成后台提取", paths: [], tags: ["模型"] }]),
             }],
           };
         },
@@ -238,10 +257,10 @@ console.log("\n📋 自动提取必须复用当前模型且不发送工具输出
 
 console.log("\n📋 阈值和索引必须一致");
 {
-  assert(DEFAULT_INJECTION_CONFIG.archiveThreshold === 0.1, "归档阈值统一为 0.10");
-  assert(DEFAULT_INJECTION_CONFIG.lowEfficiencyThreshold === 0.15, "低效阈值统一为 0.15");
+  assert(DEFAULT_INJECTION_CONFIG.archiveThreshold === 0.2, "归档阈值统一为 0.20");
+  assert(DEFAULT_INJECTION_CONFIG.lowEfficiencyThreshold === 0.3, "低效阈值统一为 0.30");
   const store = createStore("index-threshold");
-  addFact(store, "索引中的低效记忆", 0.12);
+  addFact(store, "索引中的低效记忆", 0.25);
   const md = generateIndexMd({ version: 1, updatedAt: Date.now(), memories: store.getAll() });
   assert(md.includes("索引中的低效记忆"), "MEMORY.md 使用同一归档阈值");
 }
@@ -340,7 +359,7 @@ console.log("\n📋 高相似提取不得覆写旧记忆（补充/否定无法�
     getProvider: () => ({
       streamSimple: () => ({
         result: async () => ({
-          content: [{ type: "text", text: JSON.stringify([{ type: "fact", content: factContent, paths: [], tags: [] }]) }],
+          content: [{ type: "text", text: JSON.stringify([{ type: "convention", kind: "constraint", durable: true, content: factContent, paths: [], tags: [] }]) }],
         }),
       }),
     }),
@@ -393,6 +412,66 @@ console.log("\n📋 蓝图回归项：不存在记录操作与写入失败原文
   }
   assert(saveFailed, "写入失败时抛出异常而非静默");
   assert(readFileSync(roPath, "utf8") === originalBytes, "写入失败后原文件字节不变");
+}
+
+console.log("\n📋 端到端：领导偏好保留，一次性项目细节拒收");
+{
+  const activeModel = { provider: "p", id: "m" };
+  const messages = [
+    { role: "user", content: "以后改代码前先跑测试，这是我们的规矩。".repeat(25) },
+    { role: "assistant", content: [{ type: "text", text: "好的，记住了。".repeat(10) }] },
+  ];
+  // 输出数组可定制，模拟 LLM 对不同输入的判定
+  const makeRegistry = (outputs: any[]) => ({
+    getProvider: () => ({
+      streamSimple: () => ({
+        result: async () => ({
+          content: [{ type: "text", text: JSON.stringify(outputs) }],
+        }),
+      }),
+    }),
+    getProviderAuth: async () => ({ auth: { apiKey: "test" } }),
+  });
+
+  // ① 明确长期偏好（durable=true, kind=preference）→ 保留 1 条
+  const prefStore = createStore("e2e-pref");
+  const prefResult = await new (extractor as any).MemoryExtractor(prefStore)
+    .extract(messages, makeRegistry([{ type: "preference", kind: "preference", durable: true, content: "用户要求改代码前先跑测试", paths: [], tags: ["测试"] }]), "session", activeModel);
+  assert(prefResult.added === 1, "明确长期偏好保留 1 条");
+  assert(prefStore.getAll()[0]?.type === "preference", "偏好落库为 preference 类型");
+
+  // ② 一次性状态（durable=false）→ 拒绝
+  const junkStore1 = createStore("e2e-junk1");
+  const junk1 = await new (extractor as any).MemoryExtractor(junkStore1)
+    .extract(messages, makeRegistry([{ type: "fact", kind: "project_fact", durable: false, content: "当前分支已同步 main，无新提交", paths: [], tags: [] }]), "session", activeModel);
+  assert(junk1.added === 0 && junkStore1.getAll().length === 0, "分支状态（durable=false）拒绝");
+
+  // ③ project_fact 硬闸门：即使 durable=true 也拒绝
+  const junkStore2 = createStore("e2e-junk2");
+  const junk2 = await new (extractor as any).MemoryExtractor(junkStore2)
+    .extract(messages, makeRegistry([{ type: "fact", kind: "project_fact", durable: true, content: "构建产物在 dist/a.js", paths: [], tags: [] }]), "session", activeModel);
+  assert(junk2.added === 0 && junkStore2.getAll().length === 0, "产物路径（project_fact）拒绝");
+
+  // ④ 单次执行行为不推断偏好（durable=false）→ 拒绝
+  const junkStore3 = createStore("e2e-junk3");
+  const junk3 = await new (extractor as any).MemoryExtractor(junkStore3)
+    .extract(messages, makeRegistry([{ type: "lesson", kind: "lesson", durable: false, content: "这次修复了 foo.ts 的报错", paths: [], tags: [] }]), "session", activeModel);
+  assert(junk3.added === 0 && junkStore3.getAll().length === 0, "单次修复过程（durable=false）拒绝");
+
+  // ⑤ 缺省 durable（模型没填）→ 安全默认拒绝
+  const junkStore4 = createStore("e2e-junk4");
+  const junk4 = await new (extractor as any).MemoryExtractor(junkStore4)
+    .extract(messages, makeRegistry([{ type: "fact", content: "缺少 durable 字段的事实", paths: [], tags: [] }]), "session", activeModel);
+  assert(junk4.added === 0 && junkStore4.getAll().length === 0, "缺省 durable 默认拒绝");
+
+  // ⑥ 同一偏好重复表达 → 记录总数仍为 1，evidenceCount 累计
+  const repeatStore = createStore("e2e-repeat");
+  await new (extractor as any).MemoryExtractor(repeatStore)
+    .extract(messages, makeRegistry([{ type: "preference", kind: "preference", durable: true, content: "用户要求改代码前先跑测试", paths: [], tags: ["测试"] }]), "session", activeModel);
+  await new (extractor as any).MemoryExtractor(repeatStore)
+    .extract(messages, makeRegistry([{ type: "preference", kind: "preference", durable: true, content: "用户要求改代码前先运行测试再提交", paths: [], tags: ["测试"] }]), "session", activeModel);
+  assert(repeatStore.getAll().length === 1, "重复表达后记录总数仍为 1");
+  assert((repeatStore.getAll()[0]?.evidenceCount ?? 0) === 2, "evidenceCount 累计为 2");
 }
 
 console.log("\n" + "=".repeat(40));

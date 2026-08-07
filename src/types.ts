@@ -1,6 +1,17 @@
 /** 记忆条目类型 */
 export type MemoryType = "decision" | "convention" | "pattern" | "preference" | "fact" | "lesson";
 
+/**
+ * 候选记忆类别（提取阶段判定，决定是否允许入库）：
+ * - preference  领导/用户明确表达的偏好 → 必须 durable 才入库
+ * - workflow    反复出现的工作方式/流程 → 必须 durable 才入库
+ * - constraint  跨会话稳定的约束/约定 → 必须 durable 才入库
+ * - lesson      踩坑教训（反复验证过的）→ 必须 durable 才入库
+ * - decision    跨会话有效的架构决策 → 必须 durable 才入库
+ * - project_fact 一次性项目细节（路径/分支/构建结果/进度）→ 一律拒绝
+ */
+export type MemoryKind = "preference" | "workflow" | "constraint" | "lesson" | "decision" | "project_fact";
+
 /** 单条记忆 */
 export interface MemoryEntry {
   id: string;
@@ -23,6 +34,8 @@ export interface MemoryEntry {
   sourceSession?: string;
   /** 是否已固化（accessCount ≥ 固化阈值后自动晋升，不再参与衰减和排名竞争） */
   tenured?: boolean;
+  /** 独立证据出现次数（重复表达强化计数，旧数据缺省视为 1） */
+  evidenceCount?: number;
 }
 
 /** 持久化存储格式 */
@@ -34,6 +47,9 @@ export interface MemoryStoreData {
   prunedCount?: number;
   /** 旧版冲突 UI 写入的已处理内容哈希 */
   resolvedSources?: string[];
+  /** 每日新增计数（配额控制，自动路径用） */
+  dailyAddedDate?: string;
+  dailyAddedCount?: number;
 }
 
 /** 注入配置 */
@@ -59,18 +75,21 @@ export const DEFAULT_INJECTION_CONFIG: InjectionConfig = {
   maxMemoryLength: 500,
   potencyBoost: 0.3,
   decayFactor: 0.95,
-  archiveThreshold: 0.1,
-  lowEfficiencyThreshold: 0.15,
+  archiveThreshold: 0.2,
+  lowEfficiencyThreshold: 0.3,
   tenureThreshold: 50,
 };
 
 /** 入库闸门判定级别 */
 export type DedupeLevel = "exact" | "high" | "mid" | "none";
 
-/** 提取结果 */
+/** 提取结果（LLM 原始输出经 normalizeFact 校验后） */
 export interface ExtractedFact {
   type: MemoryType;
   content: string;
   paths: string[];
   tags: string[];
+  kind: MemoryKind;
+  /** 硬闸门：非 true 的候选在解析阶段直接丢弃 */
+  durable: boolean;
 }
